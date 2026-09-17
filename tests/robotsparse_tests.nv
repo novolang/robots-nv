@@ -1,0 +1,134 @@
+// robotsparse_tests.nv — the grammar of section 2.2, and what is kept
+// rather than dropped.
+//
+// RED ON PURPOSE: every assertion reaches `not implemented:
+// robots-nv.robotsparse.<fn>`.  What is asserted is that a robots.txt
+// file has no syntax errors, that consecutive user-agent lines share
+// one set of rules, and that a rule before any user-agent line belongs
+// to nothing and is kept so a linter can say so.
+
+use std.test
+use robotsparse
+
+@test
+fn test_a_robots_file_has_no_syntax_errors() [io]
+    // Section 2.2.4: a crawler must ignore what it cannot interpret.
+    // A library that invented a refusal would refuse files every
+    // crawler reads.
+    test.case("an empty file constrains nobody")
+    let empty = robotsparse.parse("")
+    test.assert(list.len(empty.groups) == 0)
+    test.assert(robotsparse.is_empty(empty))
+
+    test.case("so does a file of nothing but comments")
+    test.assert(robotsparse.is_empty(robotsparse.parse("# nothing to see\n")))
+
+    test.case("a line that is not a record at all is skipped")
+    test.assert(robotsparse.is_empty(robotsparse.parse("this is not a record\n")))
+
+    test.case("and a record nobody recognises is KEPT, so a linter can report it")
+    let typo = robotsparse.parse("user-agent: *\ndisalow: /admin\n")
+    test.assert(list.len(typo.unknown) == 1)
+    test.assert(typo.unknown[0].name == "disalow")
+    test.assert(typo.unknown[0].value == "/admin")
+    test.assert(typo.unknown[0].line == 2)
+
+    test.case("which is why that file constrains nothing, and says so")
+    test.assert(list.len(typo.groups[0].rules) == 0)
+
+@test
+fn test_consecutive_user_agent_lines_share_one_set_of_rules() [io]
+    // Section 2.2.1.
+    let text = "user-agent: novobot\nuser-agent: othercrawler\ndisallow: /tmp/\n"
+    let rules = robotsparse.parse(text)
+
+    test.case("one group, named by two tokens")
+    test.assert(list.len(rules.groups) == 1)
+    test.assert(list.len(rules.groups[0].agents) == 2)
+    test.assert(list.len(rules.groups[0].rules) == 1)
+
+    test.case("the tokens are lower-cased, because matching them is case-insensitive")
+    test.assert(rules.groups[0].agents[0] == "novobot")
+
+    test.case("and a user-agent line after a rule starts a new group")
+    let two = robotsparse.parse("user-agent: a\ndisallow: /x\nuser-agent: b\ndisallow: /y\n")
+    test.assert(list.len(two.groups) == 2)
+    test.assert(two.groups[1].line == 3)
+
+@test
+fn test_a_rule_before_any_user_agent_line_belongs_to_nothing() [io]
+    // Section 2.2.1 leaves it applying to nobody.  It is kept rather
+    // than dropped because a file with one in it is almost always a
+    // file whose author meant something else.
+    let rules = robotsparse.parse("disallow: /admin\nuser-agent: *\ndisallow: /tmp/\n")
+
+    test.case("the orphan is not in any group")
+    test.assert(list.len(rules.groups) == 1)
+    test.assert(list.len(rules.groups[0].rules) == 1)
+
+    test.case("and it is kept, with its line")
+    test.assert(list.len(rules.orphan_rules) == 1)
+    test.assert(rules.orphan_rules[0].line == 1)
+    test.assert(rules.orphan_rules[0].pattern == "/admin")
+
+@test
+fn test_the_two_rule_kinds_and_the_empty_disallow() [io]
+    let rules = robotsparse.parse("user-agent: *\ndisallow: /a\nallow: /a/b\ndisallow:\n")
+    let group = rules.groups[0]
+
+    test.case("allow is a first-class rule, not an extension")
+    test.assert(list.len(group.rules) == 3)
+    test.assert(robotsparse.kind_text(group.rules[0].kind) == "disallow")
+    test.assert(robotsparse.kind_text(group.rules[1].kind) == "allow")
+
+    test.case("an empty disallow is a rule with an empty pattern")
+    test.assert(group.rules[2].pattern == "")
+
+    test.case("each rule knows its line, so a message can point at it")
+    test.assert(group.rules[0].line == 2)
+    test.assert(group.rules[1].line == 3)
+
+    test.case("and prints back as the file writes it")
+    test.assert(robotsparse.rule_text(group.rules[0]) == "disallow: /a")
+
+@test
+fn test_a_comment_ends_a_line_wherever_it_is() [io]
+    let rules = robotsparse.parse("user-agent: *   # everyone\ndisallow: /tmp/ # the scratch area\n")
+
+    test.case("the token is what was before the hash, trimmed")
+    test.assert(rules.groups[0].agents[0] == "*")
+
+    test.case("and so is the pattern")
+    test.assert(rules.groups[0].rules[0].pattern == "/tmp/")
+
+@test
+fn test_the_two_open_and_closed_values_are_available_as_rules() [io]
+    // What section 2.3.1's two status policies hand back, and what a
+    // caller with no file at all uses.
+    test.case("allow_all constrains nobody")
+    test.assert(robotsparse.is_empty(robotsparse.allow_all()))
+
+    test.case("and disallow_all constrains everybody")
+    let closed = robotsparse.disallow_all()
+    test.assert(not robotsparse.is_empty(closed))
+    test.assert(list.len(closed.groups) == 1)
+    test.assert(closed.groups[0].agents[0] == "*")
+
+@test
+fn test_a_file_longer_than_the_limit_is_cut_and_says_so() [io]
+    // Section 2.5 requires a crawler to parse at least 500 kibibytes
+    // and permits it to stop there.
+    test.case("the floor the section sets")
+    test.assert(robotsparse.limits().max_bytes == 512000)
+
+    test.case("a caller may choose less")
+    test.assert(robotsparse.limits_of(64).max_bytes == 64)
+
+    test.case("an ordinary file is not truncated")
+    let small = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+    test.assert(not small.truncated)
+
+    test.case("and one over the limit says so rather than looking complete")
+    let cut = robotsparse.parse_with_limit("user-agent: *\ndisallow: /tmp/\n",
+                                           robotsparse.limits_of(16))
+    test.assert(cut.truncated)

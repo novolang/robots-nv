@@ -1,0 +1,128 @@
+// robotspolicy_tests.nv — the asymmetry, and the two directives that
+// are not in the standard.
+//
+// RED ON PURPOSE: every assertion reaches `not implemented:
+// robots-nv.robotspolicy.<fn>` or a function it calls.  What is
+// asserted is that a client error opens a site and a server error
+// closes it, which is the one rule a crawler is most likely to write
+// backwards.
+
+use std.test
+use robotsmatch
+use robotsparse
+use robotspolicy
+
+@test
+fn test_a_client_error_opens_a_site_and_a_server_error_closes_it() [io]
+    // Section 2.3.1.3 and 2.3.1.4.  A 404 means the site says there is
+    // no file, which is a positive answer.  A 503 means the site could
+    // not answer at all, and a crawler that read that as permission
+    // would hammer a site precisely while it was failing.
+    test.case("a 2xx brings a file to parse, so there is no policy to apply")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(200)) == "available")
+    match robotspolicy.rules_for_status(200)
+        Some(_) => test.fail("a 2xx means parse the body")
+        None    => test.assert(true)
+
+    test.case("a 404 means there are no rules")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(404)) == "unavailable")
+    match robotspolicy.rules_for_status(404)
+        Some(rules) => test.assert(robotsmatch.is_allowed(rules, "novobot", "/anything"))
+        None        => test.fail("a 4xx has a policy")
+
+    test.case("a 401 and a 403 are the same answer, however they read")
+    match robotspolicy.rules_for_status(403)
+        Some(rules) => test.assert(robotsmatch.is_allowed(rules, "novobot", "/anything"))
+        None        => test.fail("a 4xx has a policy")
+
+    test.case("a 503 means complete disallow while it lasts")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(503)) == "unreachable")
+    match robotspolicy.rules_for_status(503)
+        Some(rules) => test.assert(not robotsmatch.is_allowed(rules, "novobot", "/anything"))
+        None        => test.fail("a 5xx has a policy")
+
+    test.case("and a request that produced no status at all produced no permission either")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(0)) == "unreachable")
+    match robotspolicy.rules_for_status(0)
+        Some(rules) => test.assert(not robotsmatch.is_allowed(rules, "novobot", "/anything"))
+        None        => test.fail("a failed request has a policy")
+
+@test
+fn test_the_two_numbers_the_specification_fixes() [io]
+    test.case("five redirects, from section 2.3.1.2")
+    test.assert(robotspolicy.max_redirects() == 5)
+
+    test.case("and twenty-four hours of caching, from section 2.4")
+    test.assert(robotspolicy.cache_seconds() == 86400)
+
+@test
+fn test_crawl_delay_is_milliseconds_because_sites_write_fractions() [io]
+    // Not in RFC 9309.  Section 2.2.4 permits a crawler to interpret
+    // records outside the protocol, which is why it is read at all and
+    // why it lives in a module of its own.
+    let rules = robotsparse.parse("user-agent: *\ncrawl-delay: 1.5\ndisallow: /tmp/\n")
+
+    test.case("a fraction of a second survives")
+    match robotspolicy.crawl_delay_ms(rules, "novobot")
+        Some(ms) => test.assert(ms == 1500)
+        None     => test.fail("this file asks for a delay")
+
+    test.case("the group carries it too")
+    test.assert(rules.groups[0].crawl_delay_ms == 1500)
+
+    test.case("a file that asks for none is None, which is not the same as zero")
+    let plain = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+    test.assert(plain.groups[0].crawl_delay_ms == 0 - 1)
+    match robotspolicy.crawl_delay_ms(plain, "novobot")
+        Some(_) => test.fail("no delay was asked for")
+        None    => test.assert(true)
+
+    test.case("the value parses on its own")
+    match robotspolicy.delay_of("2")
+        Some(ms) => test.assert(ms == 2000)
+        None     => test.fail("2 is a delay")
+
+    test.case("and anything that is not a non-negative number is not a delay")
+    match robotspolicy.delay_of("slowly")
+        Some(_) => test.fail("that is not a number")
+        None    => test.assert(true)
+    match robotspolicy.delay_of("-1")
+        Some(_) => test.fail("a negative delay is not a delay")
+        None    => test.assert(true)
+
+@test
+fn test_a_sitemap_line_belongs_to_the_file_and_not_to_a_group() [io]
+    // Which is why it is not a field on `RobotsGroup`: it applies
+    // wherever it is written.
+    let text = "sitemap: https://example.org/a.xml\nuser-agent: *\ndisallow: /tmp/\nsitemap: https://example.org/b.xml\n"
+    let rules = robotsparse.parse(text)
+
+    test.case("both lines, in the order the file gives them")
+    let found = robotspolicy.sitemaps(rules)
+    test.assert(list.len(found) == 2)
+    test.assert(found[0] == "https://example.org/a.xml")
+    test.assert(found[1] == "https://example.org/b.xml")
+
+    test.case("the values are as written, and nothing is fetched")
+    test.assert(rules.sitemaps[0] == "https://example.org/a.xml")
+
+    test.case("and a file with a sitemap line and nothing else constrains nobody")
+    test.assert(robotsparse.is_empty(robotsparse.parse("sitemap: https://example.org/a.xml\n")))
+
+@test
+fn test_the_extensions_this_package_reads_are_named() [io]
+    // So a caller reading `unknown` knows that nothing in that list
+    // was silently interpreted.
+    test.case("the two that are read")
+    test.assert(robotspolicy.is_extension("crawl-delay"))
+    test.assert(robotspolicy.is_extension("sitemap"))
+
+    test.case("and the ones that are not")
+    test.assert(not robotspolicy.is_extension("host"))
+    test.assert(not robotspolicy.is_extension("clean-param"))
+    test.assert(not robotspolicy.is_extension("request-rate"))
+
+    test.case("a record that is not read lands in unknown, with its line")
+    let rules = robotsparse.parse("user-agent: *\nhost: example.org\n")
+    test.assert(list.len(rules.unknown) == 1)
+    test.assert(rules.unknown[0].name == "host")

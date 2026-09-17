@@ -1,0 +1,49 @@
+[package]
+name        = "robots-nv"
+version     = "0.0.1"
+description = "RFC 9309 as a pure decision: the robots.txt grammar parsed into groups, the longest-match rule with `*` and `$`, groups merged by user-agent token, the unavailable and unreachable status policies, and crawl-delay and sitemap read as the extensions they are."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  Every function answers a question about two strings the
+# caller already holds: a robots.txt file and a path.  Fetching the
+# file is the caller's `[net]`, and so is obeying a crawl delay —
+# RFC 9309's own rules are a decision, and a decision costs nothing.
+# The status policies of section 2.3.1 are here as pure functions from
+# a status code, because the policy is the specification's and the
+# request is the caller's.
+layer       = "core"
+
+category    = "web"
+
+tags        = ["robots", "robots-txt", "rfc-9309", "crawler", "user-agent", "web"]
+repository  = "https://github.com/novolang/robots-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "RFC 9309, as a decision over a path and an agent name"
+
+[dependencies]
+# NONE, AND THE ABSENCE IS A FINDING RATHER THAN AN OVERSIGHT.  Two
+# dependencies look obvious and neither is needed.
+#
+# glob-nv would be wrong: a robots.txt path pattern is not a glob.
+# RFC 9309 section 2.2.2 gives `*` and `$` and nothing else — no `?`,
+# no character class, no `**`, and `*` crosses a `/` freely, which is
+# the opposite of what a glob means.  Borrowing a glob matcher would
+# mean turning most of it off and getting the remainder subtly wrong.
+#
+# url-nv would be wrong too: section 2.2.2 matches the path and query
+# of a URL as OCTETS, after percent-encoding, and does not parse or
+# normalise it.  A matcher that normalised would answer differently
+# from every crawler in existence on a path holding `%2F`.

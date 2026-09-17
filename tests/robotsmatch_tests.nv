@@ -1,0 +1,140 @@
+// robotsmatch_tests.nv — the longest-match rule, the tie-break, and
+// the two special characters.
+//
+// RED ON PURPOSE: every assertion reaches `not implemented:
+// robots-nv.robotsmatch.<fn>` or a function it calls.  What is
+// asserted is that the longest PATTERN decides rather than the first
+// or the last rule, that an allow wins a tie, that `*` crosses a
+// slash, and that silence is permission.
+
+use std.test
+use robotsmatch
+use robotsparse
+
+fn rules_of(text: Str) -> robotsparse.RobotsRules
+    robotsparse.parse(text)
+
+@test
+fn test_a_path_no_rule_matches_is_allowed() [io]
+    // robots.txt is a list of exclusions, and silence is permission.
+    let rules = rules_of("user-agent: *\ndisallow: /tmp/\n")
+
+    test.case("a path outside every rule")
+    test.assert(robotsmatch.is_allowed(rules, "novobot", "/about"))
+
+    test.case("and the verdict says nothing matched, rather than naming a rule")
+    test.assert(robotsmatch.verdict_text(robotsmatch.decide(rules, "novobot", "/about"))
+                == "unmatched")
+    test.assert(robotsmatch.verdict_line(robotsmatch.decide(rules, "novobot", "/about")) == 0)
+
+    test.case("an empty file allows everything")
+    test.assert(robotsmatch.is_allowed(rules_of(""), "novobot", "/anything"))
+
+    test.case("and an unmatched verdict permits, so a caller need not remember which way it falls")
+    test.assert(robotsmatch.permits(RobotsUnmatched))
+    test.assert(robotsmatch.permits(RobotsAllowed(2)))
+    test.assert(not robotsmatch.permits(RobotsDisallowed(2)))
+
+@test
+fn test_the_longest_pattern_decides_not_the_first_or_the_last_rule() [io]
+    // Section 2.2.2.  A crawler that took the first matching rule, or
+    // the last, would get this file wrong in opposite directions.
+    let rules = rules_of("user-agent: *\ndisallow: /a\nallow: /a/b\ndisallow: /a/b/c\n")
+
+    test.case("the shortest pattern forbids the general case")
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", "/a/x"))
+
+    test.case("a longer allow re-opens a part of it")
+    test.assert(robotsmatch.is_allowed(rules, "novobot", "/a/b/x"))
+
+    test.case("and a longer disallow closes a part of that")
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", "/a/b/c/x"))
+
+    test.case("the verdict names the line that decided, which is not the last line")
+    test.assert(robotsmatch.verdict_line(robotsmatch.decide(rules, "novobot", "/a/b/x")) == 3)
+
+    test.case("specificity is the pattern's own length, not how much of the path matched")
+    test.assert(robotsmatch.specificity("/a") == 2)
+    test.assert(robotsmatch.specificity("/a/b/c") == 6)
+
+@test
+fn test_an_allow_wins_a_tie() [io]
+    // Section 2.2.2, and what makes the common pair work.
+    test.case("the same pattern, written both ways")
+    let both = rules_of("user-agent: *\ndisallow: /p\nallow: /p\n")
+    test.assert(robotsmatch.is_allowed(both, "novobot", "/p"))
+
+    test.case("and in the other order, which changes nothing")
+    let reversed = rules_of("user-agent: *\nallow: /p\ndisallow: /p\n")
+    test.assert(robotsmatch.is_allowed(reversed, "novobot", "/p"))
+
+    test.case("every rule that matched can be listed, not only the winner")
+    test.assert(list.len(robotsmatch.matching_rules(both, "novobot", "/p")) == 2)
+
+@test
+fn test_the_two_special_characters_and_no_others() [io]
+    // Section 2.2.2 gives `*` and `$`.  There is no `?`, no character
+    // class, and no escape.
+    test.case("a star crosses a slash, which is the opposite of a glob")
+    let starred = rules_of("user-agent: *\ndisallow: /a*/private\n")
+    test.assert(not robotsmatch.is_allowed(starred, "novobot", "/a/b/c/private"))
+
+    test.case("a dollar anchors to the end of the path")
+    test.assert(robotsmatch.matches_path("/*.pdf\u{24}", "/a/b.pdf"))
+    test.assert(not robotsmatch.matches_path("/*.pdf\u{24}", "/a/b.pdf.html"))
+
+    test.case("a pattern with no dollar matches a prefix")
+    test.assert(robotsmatch.matches_path("/tmp", "/tmpfile"))
+    test.assert(robotsmatch.matches_path("/tmp", "/tmp/x"))
+
+    test.case("a question mark is an ordinary character here")
+    test.assert(robotsmatch.matches_path("/s?q=", "/s?q=cats"))
+    test.assert(not robotsmatch.matches_path("/s?q=", "/sxq="))
+
+    test.case("and an empty pattern matches everything, which is what an empty disallow means")
+    test.assert(robotsmatch.matches_path("", "/anything"))
+    test.assert(robotsmatch.is_allowed(rules_of("user-agent: *\ndisallow:\n"),
+                                       "novobot", "/anything"))
+
+@test
+fn test_the_group_is_the_most_specific_match_and_the_star_does_not_compete() [io]
+    // Section 2.2.1.  `*` is used only when no real token matches.
+    let rules = rules_of("user-agent: *\ndisallow: /\nuser-agent: novobot\ndisallow: /tmp/\n")
+
+    test.case("a named agent gets its own group, however short the token")
+    test.assert(robotsmatch.is_allowed(rules, "novobot", "/about"))
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", "/tmp/x"))
+
+    test.case("and an agent nobody named falls to the catch-all")
+    test.assert(not robotsmatch.is_allowed(rules, "othercrawler", "/about"))
+
+    test.case("the token match is case-insensitive and is a prefix of the agent name")
+    test.assert(robotsmatch.agent_matches("Googlebot", "googlebot-image"))
+    test.assert(robotsmatch.agent_matches("*", "anything-at-all"))
+    test.assert(not robotsmatch.agent_matches("bingbot", "googlebot"))
+
+    test.case("the group can be asked for directly")
+    match robotsmatch.group_for(rules, "novobot")
+        Some(group) => test.assert(list.len(group.rules) == 1)
+        None        => test.fail("novobot is named in this file")
+
+    test.case("and a file that names nobody constrains nobody")
+    match robotsmatch.group_for(rules_of("sitemap: https://example.org/s.xml\n"), "novobot")
+        Some(_) => test.fail("nothing in that file names an agent")
+        None    => test.assert(true)
+
+@test
+fn test_two_groups_naming_one_agent_are_combined() [io]
+    // Section 2.2.1 requires it, and a file that names `googlebot`
+    // twice is common.  A crawler that used whichever came first would
+    // ignore half of what the site said.
+    let rules = rules_of("user-agent: novobot\ndisallow: /a\nuser-agent: novobot\ndisallow: /b\n")
+
+    test.case("both sets of rules apply")
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", "/a/x"))
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", "/b/x"))
+
+    test.case("and the merged group holds them all")
+    match robotsmatch.group_for(rules, "novobot")
+        Some(group) => test.assert(list.len(group.rules) == 2)
+        None        => test.fail("novobot is named twice in this file")

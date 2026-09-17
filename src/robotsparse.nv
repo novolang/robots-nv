@@ -1,0 +1,274 @@
+// robotsparse.nv — the robots.txt grammar of RFC 9309 section 2.2.
+//
+// A ROBOTS.TXT FILE HAS NO SYNTAX ERRORS
+//
+// Section 2.2.4 is explicit: a crawler MAY interpret records it does
+// not recognise, and MUST ignore the ones it cannot.  A line that is
+// not a record at all is skipped.  So `parse` answers a value and
+// never a `Result`: there is no input for which a conforming crawler
+// stops reading, and a library that invented a refusal would refuse
+// files every crawler in existence reads.
+//
+// What it does instead is KEEP what it did not understand.
+// `RobotsRules.unknown` holds every line that was a `name: value`
+// record this package has no meaning for, with its line number, so a
+// tool that lints a site's robots.txt can report a `Disalow:` typo
+// that is currently doing nothing at all.
+//
+// A GROUP IS A RUN OF USER-AGENT LINES AND THE RULES AFTER THEM
+//
+// Section 2.2.1: consecutive `user-agent` lines belong to one group,
+// and the group ends at the first rule line followed by another
+// `user-agent` line.  A rule appearing before any `user-agent` line is
+// not in a group at all and is ignored, which is a real file in the
+// field and a real source of confusion.
+//
+// THE FILE IS READ AS OCTETS
+//
+// Section 2.2.2 matches a path as octets.  Nothing here decodes
+// percent-encoding, folds case in a path, or normalises `..` — a
+// matcher that did would answer differently from every crawler in
+// existence on a path holding `%2F`.  Case-insensitivity applies to
+// the record names and to the user-agent token, and to nothing else.
+
+// Whether a rule permits or forbids.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println(robotsparse.kind_text(RobotsAllow))
+// ```
+pub enum RobotsRuleKind
+    // An `allow` line.  Section 2.2.2 makes it a first-class rule, not
+    // an extension: an `allow` and a `disallow` of equal length are a
+    // tie the `allow` wins.
+    RobotsAllow
+    // A `disallow` line.  A `disallow` with an empty value allows
+    // everything, which is the idiom a site uses to open itself up
+    // inside a group that otherwise closes.
+    RobotsDisallow
+
+// One `allow` or `disallow` line.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println("${list.len(rules.groups)}")
+// ```
+pub struct RobotsRule
+    // Whether it permits or forbids.
+    kind: RobotsRuleKind
+    // The path pattern, as written and not decoded.  `*` matches any
+    // run of octets and `$` at the end anchors to the end of the path;
+    // every other octet is itself.
+    pattern: Str
+    // The 1-based line in the file the rule was written on, so a
+    // message can point at it.
+    line: Int
+
+// A record this package has no meaning for.
+//
+// A `crawl-delay` line, a `sitemap` line, a `host` line, a `clean-param`
+// line, and every typo.  Section 2.2.4 says a crawler must ignore what
+// it cannot interpret, and keeping them is what lets a linter say that
+// `Disalow: /admin` is doing nothing.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("disalow: /admin\n")
+//     println("${list.len(rules.unknown)}")
+// ```
+pub struct RobotsUnknown
+    // The record name, lower-cased, as it appeared before the colon.
+    name: Str
+    // Everything after the colon, with surrounding whitespace and any
+    // comment removed.
+    value: Str
+    // The 1-based line it was written on.
+    line: Int
+
+// One group: the agents it is for, and the rules that apply to them.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println("${list.len(rules.groups[0].rules)}")
+// ```
+pub struct RobotsGroup
+    // The product tokens on this group's `user-agent` lines,
+    // lower-cased.  `"*"` is the catch-all.  Several because
+    // consecutive `user-agent` lines share one set of rules.
+    agents: [Str]
+    // The rules, in the order the file gives them.  Order does not
+    // decide anything — section 2.2.2's rule is longest match — but it
+    // is kept so a message can quote the file.
+    rules: [RobotsRule]
+    // The `crawl-delay` value in milliseconds, or `-1`.  Not in RFC
+    // 9309; see `robotspolicy`.
+    crawl_delay_ms: Int
+    // The 1-based line the group's first `user-agent` line is on.
+    line: Int
+
+// A whole robots.txt file, parsed.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${list.len(robotsparse.parse("").groups)}")
+// ```
+pub struct RobotsRules
+    // The groups, in the order the file gives them.
+    groups: [RobotsGroup]
+    // Every `sitemap` line's value, in order.  Not in RFC 9309; it is
+    // a record of the whole file rather than of a group, which is why
+    // it is here and not on `RobotsGroup`.
+    sitemaps: [Str]
+    // Every record this package has no meaning for.
+    unknown: [RobotsUnknown]
+    // Rules that appeared before any `user-agent` line, and so belong
+    // to no group.  Section 2.2.1 leaves them applying to nothing, and
+    // they are kept here rather than dropped because a file with them
+    // in it is almost always a file whose author meant something else.
+    orphan_rules: [RobotsRule]
+    // Whether the file was longer than the parse limit and was cut.
+    // Section 2.5 requires a crawler to parse at least 500 kibibytes
+    // and permits it to stop there.
+    truncated: Bool
+
+// How much of a file is read.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.limits().max_bytes}")
+// ```
+pub struct RobotsLimits
+    // How many bytes to parse before stopping.  Section 2.5 sets the
+    // floor at 500 kibibytes, which is what `limits()` uses.
+    max_bytes: Int
+
+// A file, parsed, under the default limit.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println("${list.len(rules.groups)}")
+// ```
+pub fn parse(text: Str) -> RobotsRules []
+    todo("robots-nv.robotsparse.parse")
+
+// A file, parsed, under a caller's own limit.
+//
+// A crawler that fetched more than it wants to parse, or a test that
+// wants to see `truncated` set.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.parse_with_limit("", robotsparse.limits_of(64)).truncated}")
+// ```
+pub fn parse_with_limit(text: Str, l: RobotsLimits) -> RobotsRules []
+    todo("robots-nv.robotsparse.parse_with_limit")
+
+// The section 2.5 floor: 512,000 bytes.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.limits().max_bytes}")
+// ```
+pub fn limits() -> RobotsLimits []
+    todo("robots-nv.robotsparse.limits")
+
+// A limit of a caller's own.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.limits_of(64).max_bytes}")
+// ```
+pub fn limits_of(max_bytes: Int) -> RobotsLimits []
+    todo("robots-nv.robotsparse.limits_of")
+
+// Rules that permit everything.
+//
+// What a site with no robots.txt means, and what section 2.3.1.3 says
+// a crawler may assume when the file answers a client error.
+// `robotspolicy.rules_for_status` is where that decision is made; this
+// is the value it hands back.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${list.len(robotsparse.allow_all().groups)}")
+// ```
+pub fn allow_all() -> RobotsRules []
+    todo("robots-nv.robotsparse.allow_all")
+
+// Rules that forbid everything.
+//
+// What section 2.3.1.4 says a crawler must assume while the file is
+// unreachable.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${list.len(robotsparse.disallow_all().groups)}")
+// ```
+pub fn disallow_all() -> RobotsRules []
+    todo("robots-nv.robotsparse.disallow_all")
+
+// The rule printed back as the file writes it: `"disallow: /tmp/"`.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println(robotsparse.rule_text(rules.groups[0].rules[0]))
+// ```
+pub fn rule_text(r: RobotsRule) -> Str []
+    todo("robots-nv.robotsparse.rule_text")
+
+// The kind's name: `"allow"` or `"disallow"`.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println(robotsparse.kind_text(RobotsDisallow))
+// ```
+pub fn kind_text(k: RobotsRuleKind) -> Str []
+    todo("robots-nv.robotsparse.kind_text")
+
+// Whether a file said nothing that constrains any crawler.
+//
+// True when there are no groups holding any rule.  A file of nothing
+// but comments, a file of nothing but `sitemap` lines, and an empty
+// file all answer true, and all three mean the same thing: everything
+// is allowed.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.is_empty(robotsparse.parse("# nothing here\n"))}")
+// ```
+pub fn is_empty(rules: RobotsRules) -> Bool []
+    todo("robots-nv.robotsparse.is_empty")

@@ -1,0 +1,232 @@
+// robotsmatch.nv — the decision, which is two rules and a tie-break.
+//
+// FINDING THE GROUP: MOST SPECIFIC, AND MERGED
+//
+// Section 2.2.1.  A crawler compares its product token against each
+// group's `user-agent` tokens, case-insensitively, and uses the group
+// whose token is the most specific match.  `*` is the catch-all and is
+// used only when no token matches at all — it does not compete with a
+// real name on length.
+//
+// And more than one group may name the same token.  Section 2.2.1 says
+// those groups MUST be combined into one, which is why `group_for`
+// answers a merged `RobotsGroup` rather than the first one it found.
+// A file that names `googlebot` twice, which is common, constrains it
+// with both sets of rules and not with whichever came first.
+//
+// CHOOSING THE RULE: MOST OCTETS, ALLOW WINS A TIE
+//
+// Section 2.2.2.  Every rule in the group is matched against the path,
+// and the one whose PATTERN is longest in octets decides.  Not the
+// first, not the last, and not the one that matched the most of the
+// path: the length of the pattern as written, wildcards counted as the
+// characters they are.
+//
+// If an `allow` and a `disallow` are the same length, the `allow`
+// wins.  That tie-break is what makes the common pair work:
+//
+//   disallow: /admin
+//   allow: /admin
+//
+// and, more usefully, what decides `/p` against `/p` when a site has
+// written both.
+//
+// A path that no rule matches is ALLOWED.  robots.txt is a list of
+// exclusions, and silence is permission.
+//
+// THE PATH IS OCTETS, AND `*` IS NOT A GLOB
+//
+// Section 2.2.2 gives two special characters and no others.  `*`
+// matches any run of octets INCLUDING `/`, which is the opposite of
+// what `*` means in a shell or in a glob library.  `$` at the end of a
+// pattern anchors the match to the end of the path.  There is no `?`,
+// no character class, and no escape: a literal `*` cannot be written.
+
+use robotsparse
+
+// What the rules say about one path.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println(robotsmatch.verdict_text(RobotsUnmatched))
+// ```
+pub enum RobotsVerdict
+    // No rule matched, so the path is allowed.  Kept apart from
+    // `RobotsAllowed` because a tool explaining a decision should be
+    // able to say "nothing forbids it" rather than name a rule that
+    // does not exist.
+    RobotsUnmatched
+    // An `allow` rule decided.  `line` is the line it is on.
+    RobotsAllowed(line: Int)
+    // A `disallow` rule decided.  `line` is the line it is on.
+    RobotsDisallowed(line: Int)
+
+// Whether a crawler calling itself `agent` may fetch `path`.
+//
+// `path` is the path and query of the URL, as octets, beginning with
+// `/` — `"/a/b?c=1"`.  `agent` is the product token the crawler
+// identifies itself by, without a version: `"novobot"`, not
+// `"novobot/1.0 (+https://example.org)"`.
+//
+// A path no rule matches is allowed, because robots.txt is a list of
+// exclusions.
+//
+// ```novo
+// use robotsmatch
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println("${robotsmatch.is_allowed(rules, "novobot", "/tmp/x")}")
+//     println("${robotsmatch.is_allowed(rules, "novobot", "/about")}")
+// ```
+pub fn is_allowed(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> Bool []
+    todo("robots-nv.robotsmatch.is_allowed")
+
+// The same decision, with the rule that made it.
+//
+// A crawler that logs why it skipped a URL, and a tool that explains a
+// site's own robots.txt to its author, both need the line.
+//
+// ```novo
+// use robotsmatch
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     println(robotsmatch.verdict_text(robotsmatch.decide(rules, "novobot", "/tmp/x")))
+// ```
+pub fn decide(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> RobotsVerdict []
+    todo("robots-nv.robotsmatch.decide")
+
+// The group that applies to an agent, with every group naming it
+// merged into one, or `None`.
+//
+// Section 2.2.1's rule in one call.  `None` when no group names the
+// agent and no group names `*`, which means nothing constrains it.
+//
+// ```novo
+// use robotsmatch
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
+//     match robotsmatch.group_for(rules, "novobot")
+//         Some(group) => println("${list.len(group.rules)}")
+//         None        => println("nothing constrains this agent")
+// ```
+pub fn group_for(rules: robotsparse.RobotsRules, agent: Str) -> ?robotsparse.RobotsGroup []
+    todo("robots-nv.robotsmatch.group_for")
+
+// Whether a `user-agent` token applies to an agent name.
+//
+// Case-insensitive, and `"*"` applies to everything.  A token applies
+// when the agent name begins with it, which is what lets a file name
+// `googlebot` and constrain `googlebot-image` — and what a crawler
+// naming itself `novobot-news` should expect.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println("${robotsmatch.agent_matches("Googlebot", "googlebot-image")}")
+//     println("${robotsmatch.agent_matches("bingbot", "googlebot")}")
+// ```
+pub fn agent_matches(token: Str, agent: Str) -> Bool []
+    todo("robots-nv.robotsmatch.agent_matches")
+
+// Whether a path pattern matches a path.
+//
+// Section 2.2.2's two special characters and nothing else: `*` is any
+// run of octets including `/`, and `$` at the end anchors to the end
+// of the path.  A pattern that is a prefix of the path matches, which
+// is why `disallow: /tmp` forbids `/tmpfile` as well as `/tmp/x`.
+//
+// Public because a linter checking a site's own file, and a caller
+// writing its own filter over the parsed rules, both need exactly this
+// and would otherwise write it again.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println("${robotsmatch.matches_path("/tmp", "/tmpfile")}")
+//     println("${robotsmatch.matches_path("/*.pdf\u{24}", "/a/b.pdf")}")
+// ```
+pub fn matches_path(pattern: Str, path: Str) -> Bool []
+    todo("robots-nv.robotsmatch.matches_path")
+
+// How specific a pattern is, in octets.
+//
+// The number section 2.2.2 compares: the length of the pattern as
+// written, with `*` and `$` counted as the characters they are.  It is
+// NOT how much of the path was matched, and the difference decides
+// every case where a short wildcard pattern competes with a long
+// literal one.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println("${robotsmatch.specificity("/tmp/")}")
+// ```
+pub fn specificity(pattern: Str) -> Int []
+    todo("robots-nv.robotsmatch.specificity")
+
+// Every rule in the agent's group that matches a path, in file order.
+//
+// `decide` answers which one won; this answers all of them.  A tool
+// explaining a robots.txt to its author shows the list, because the
+// interesting part is usually the rule the author expected to win.
+//
+// ```novo
+// use robotsmatch
+// use robotsparse
+//
+// fn main() [io]
+//     let rules = robotsparse.parse("user-agent: *\ndisallow: /a\nallow: /a/b\n")
+//     println("${list.len(robotsmatch.matching_rules(rules, "novobot", "/a/b"))}")
+// ```
+pub fn matching_rules(rules: robotsparse.RobotsRules, agent: Str,
+                      path: Str) -> [robotsparse.RobotsRule] []
+    todo("robots-nv.robotsmatch.matching_rules")
+
+// The verdict's name for a message: `"allowed"`, `"disallowed"`,
+// `"unmatched"`.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println(robotsmatch.verdict_text(RobotsDisallowed(3)))
+// ```
+pub fn verdict_text(v: RobotsVerdict) -> Str []
+    todo("robots-nv.robotsmatch.verdict_text")
+
+// The line the deciding rule is on, or `0` when nothing matched.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println("${robotsmatch.verdict_line(RobotsAllowed(4))}")
+// ```
+pub fn verdict_line(v: RobotsVerdict) -> Int []
+    todo("robots-nv.robotsmatch.verdict_line")
+
+// Whether a verdict permits the fetch.
+//
+// True for `RobotsAllowed` and for `RobotsUnmatched`, because silence
+// is permission.  It is here so that a caller holding a verdict does
+// not have to remember which way `RobotsUnmatched` falls.
+//
+// ```novo
+// use robotsmatch
+//
+// fn main() [io]
+//     println("${robotsmatch.permits(RobotsUnmatched)}")
+// ```
+pub fn permits(v: RobotsVerdict) -> Bool []
+    todo("robots-nv.robotsmatch.permits")
