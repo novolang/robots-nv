@@ -5,6 +5,37 @@ All notable changes to robots-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## [0.1.0] — 2026-09-27
+
+The first implementation of the interface published as 0.0.1, with RFC
+9309's examples and the documented cases of Google's parser as the test
+suite.
+
+### Added
+
+- `robotsparse.token_of`, the product token a `user-agent` value
+  names, and `robotsparse.delay_ms`, a `crawl-delay` value in
+  milliseconds or -1.  `robotsmatch` and `robotspolicy` are built on
+  them.
+
+### Changed
+
+- `robotsmatch.agent_matches` compares product tokens exactly, without
+  regard to case, after reading each up to its first character that
+  cannot be in a token.  The interface documented a prefix match, under
+  which `googlebot` constrained `googlebot-image`; RFC 9309 section
+  2.2.1 and Google's parser both compare the token itself.
+- Paths and patterns are compared after the percent-encoding step of
+  RFC 9309 section 2.2.2: a non-ASCII octet is escaped on both sides, an
+  escaped unreserved character in the path is decoded, and the hex
+  digits of other escapes are compared without regard to case.  The
+  interface documented a comparison of raw octets.
+- A rule with an empty pattern decides nothing and is not listed by
+  `matching_rules`, and `/robots.txt` is always allowed (section 2.2.2).
+- `robotspolicy.availability_of` answers `RobotsUnavailable` for a 3xx,
+  a redirect the caller stopped following (section 2.3.1.2).
+- A file cut at the parse limit is read up to its last whole line.
+
 ## [0.0.1] — 2026-09-17
 
 **The interface, published before anyone implements it.** Every public

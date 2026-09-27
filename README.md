@@ -7,12 +7,6 @@ it are specified in
 This package parses such a file and answers whether a given crawler may
 fetch a given path. It makes no request of its own.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What the format is
 
 A `robots.txt` file is a list of records, one per line, each a name, a
@@ -25,43 +19,53 @@ line. Three record names are in the standard.
 | `disallow` | A path pattern the crawler must not fetch |
 | `allow` | A path pattern the crawler may fetch |
 
-A **group** is a run of consecutive `user-agent` lines followed by the
-rules that apply to them. A group ends where the next `user-agent` line
-begins. A rule written before any `user-agent` line is in no group and
-applies to nobody.
+A **group** is one or more `user-agent` lines followed by the rules
+that apply to them. A group ends at the next `user-agent` line that
+follows a rule. A rule written before any `user-agent` line is in no
+group and applies to nobody.
 
-A crawler finds its group by comparing its own product token —
-`novobot`, not `novobot/1.0 (+https://example.org)` — against each
-group's tokens, case-insensitively. A token applies when the crawler's
-name begins with it, so a file naming `googlebot` constrains
-`googlebot-image`. `*` is used only when no real token matches. If more
-than one group names the same token, they are combined into one.
+A crawler finds its group by comparing its own product token with each
+group's tokens, without regard to case. A product token is letters,
+`_` and `-`, so `user-agent: ExampleBot/1.0` names `examplebot`. The
+comparison is exact: a file naming `googlebot` does not constrain
+`googlebot-image`. `*` is used only when no group names the crawler. If
+more than one group names the same token, they are combined into one.
 
-A **path pattern** is matched against the path and query of a URL, as
-octets. Two characters are special and no others are.
+A **path pattern** is matched against the path and query of a URL,
+octet by octet from the start. Two characters are special and no others
+are.
 
 | Written | Meaning |
 | --- | --- |
 | `*` | Any run of octets, including `/` |
 | `$` | At the end of a pattern, anchors the match to the end of the path |
 
-There is no `?`, no character class and no escape, and a pattern with
-no `$` matches a prefix: `disallow: /tmp` forbids `/tmpfile` as well as
-`/tmp/x`.
+There is no `?` and no character class. A pattern with no `$` matches
+a prefix: `disallow: /tmp` forbids `/tmpfile` as well as `/tmp/x`. A
+literal `*` or `$` is written percent-encoded, as `%2A` or `%24`.
+
+Before comparing, section 2.2.2 brings both sides to one form. An octet
+outside ASCII is written as `%` and two hex digits, so a pattern holding
+`ツ` matches a path holding `%E3%83%84`. In the path, an escape of an
+unreserved character (a letter, a digit, `-`, `.`, `_` or `~`) is
+decoded, so `%62%61%7A` is `baz`. Other escapes stay as they are, with
+their hex digits compared without regard to case, so `%2F` never
+matches `/`.
 
 When several rules match a path, **the one whose pattern is longest in
 octets decides** — not the first, not the last, and not the one that
 matched the most of the path. If an `allow` and a `disallow` are the
 same length, the `allow` wins. A path that no rule matches is
 **allowed**: the file is a list of exclusions, and silence is
-permission.
+permission. A rule with an empty pattern, such as `disallow:` with no
+value, decides nothing, and `/robots.txt` itself is always allowed.
 
 When `robots.txt` itself cannot be fetched, the status decides.
 
 | Status | What a crawler must assume |
 | --- | --- |
 | 2xx | The body is the file |
-| 4xx | There are no rules; anything may be fetched |
+| 3xx the caller stopped following, 4xx | There are no rules; anything may be fetched |
 | 5xx, or no response | Complete disallow, while it lasts |
 
 `crawl-delay` and `sitemap` are **not** in RFC 9309. Both are written
@@ -104,10 +108,8 @@ fn main() [io]
         None     => println("no delay asked for")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: robots-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+The program prints `true`, `false` and `true`, then `disallowed by
+line 4` and `wait 1500 ms between requests`.
 
 ## What the package contains
 
@@ -142,15 +144,17 @@ carries the records that were not understood, with their line numbers.
 1. **Nothing here fetches anything.** The caller retrieves
    `robots.txt`, and the caller obeys a crawl delay. Making a request
    and waiting are effects; deciding is not.
-2. **A path is the path and query of a URL, as octets, beginning with
-   `/`.** Nothing is decoded, case-folded or normalised. A matcher that
-   normalised would answer differently from every crawler in existence
-   on a path holding `%2F`. Section 2.2.2.
-3. **An agent is a product token, not a User-Agent header.**
-   `"novobot"`, not `"novobot/1.0 (+https://example.org)"`.
-4. **The longest pattern decides.** Measured in octets of the pattern
-   as written, with `*` and `$` counted as the characters they are.
-   Not the first rule, not the last. Section 2.2.2.
+2. **A path is the path and query of a URL as it appears in the URI,
+   beginning with `/`.** The only changes made before comparing are the
+   ones section 2.2.2 prescribes and "What the format is" lists.
+   Nothing is case-folded, and `..` is not resolved.
+3. **An agent is a product token.** `"novobot"`; a longer name such as
+   `"novobot/1.0 (+https://example.org)"` is read up to its first
+   character that cannot be in a token.
+4. **The longest pattern decides.** Measured in octets of the pattern,
+   after a non-ASCII octet is written as its three-octet escape, with
+   `*` and `$` counted as the characters they are. Not the first rule,
+   not the last. Section 2.2.2.
 5. **An `allow` wins a tie.** Two matching rules of equal length are
    decided in favour of the `allow`. Section 2.2.2.
 6. **A path no rule matches is allowed.** `RobotsUnmatched` is a
@@ -165,8 +169,9 @@ carries the records that were not understood, with their line numbers.
 9. **Groups naming the same token are combined.** A file that names
    `googlebot` twice constrains it with both sets of rules. Section
    2.2.1.
-10. **`*` does not compete with a real token on length.** It is used
-    only when no group names the crawler at all.
+10. **`*` is used only when no group names the crawler.** A token names
+    a crawler when the two are equal without regard to case; one is not
+    a prefix of the other.
 11. **A rule before any `user-agent` line applies to nobody.** It is
     kept in `RobotsRules.orphan_rules` rather than dropped, because a
     file with one in it is almost always a file whose author meant
@@ -187,7 +192,11 @@ carries the records that were not understood, with their line numbers.
     `RobotsGroup`.
 16. **A file over the parse limit is cut, and says so.** Section 2.5
     requires a crawler to parse at least 500 kibibytes and permits it
-    to stop there. `RobotsRules.truncated` is how a caller finds out.
+    to stop there. `RobotsRules.truncated` is how a caller finds out,
+    and a line cut in half is dropped rather than read as a shorter
+    one.
+17. **A line ends at CR, LF or CR LF.** Section 2.2's grammar allows
+    all three.
 
 ## What is not included
 
@@ -211,6 +220,10 @@ carries the records that were not understood, with their line numbers.
   [url-nv](https://novo-lang.org/packages/url-nv) is for that, and a
   caller that normalises before asking this package will get answers no
   other crawler gives.
+- **Google's lenient readings.** Google's parser accepts a record with
+  no colon, such as `disallow /x`, and some misspelled record names.
+  RFC 9309 requires the colon, and a misspelled name is kept in
+  `RobotsRules.unknown`.
 
 ## Related packages
 
@@ -228,41 +241,27 @@ carries the records that were not understood, with their line numbers.
 novo test tests/robotsparse_tests.nv    # the grammar, and what is kept
 novo test tests/robotsmatch_tests.nv    # longest match, the tie-break, `*` and `$`
 novo test tests/robotspolicy_tests.nv   # the status asymmetry and the extensions
+bash tests/coverage.sh                  # line coverage over src/
 ```
 
-The normative source is RFC 9309. The reference implementations are the
-Rust crate `robotstxt`, which is a port of Google's own parser, and
-Python's `urllib.robotparser`.
+The normative source is RFC 9309, and its examples are in the suite:
+the merged group of Figure 2, the fallback to `*` of Figure 3, the
+percent-encoding of Figure 4, and the special characters of Figures 5
+and 6. So are the documented cases of Google's parser,
+`google/robotstxt`'s `robots_test.cc`: the user-agent value read up to
+its first space and without regard to case, the global group as a
+fallback only, case-sensitive paths, the longest match, the special
+characters, and the empty `disallow`.
 
-The suite asserts that the longest pattern decides rather than the
-first or the last rule, that an `allow` wins a tie in either written
-order, that `*` crosses a slash, that `$` anchors only at the end, that
-two groups naming one agent are combined, that a rule before any
-`user-agent` line applies to nobody, that an unrecognised record is
-kept with its line number, and that a 404 opens a site while a 503
-closes it.
+Google's parser differs from RFC 9309 in two places, and the suite
+follows the RFC. It does not encode a non-ASCII octet in the path
+before comparing, and it does not decode an escaped unreserved
+character in the path.
 
-The tests compile today and fail at run, each on the
-`not implemented: robots-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `robotsparse.RobotsRules`, `.RobotsGroup`, `.RobotsRule`, `.RobotsRuleKind`, `.RobotsUnknown`, `.RobotsLimits` | the types are declared |
-| `robotsmatch.RobotsVerdict`, `robotspolicy.RobotsAvailability` | the types are declared |
-| `robotsparse.parse`, `.parse_with_limit`, `.limits`, `.limits_of` | no |
-| `robotsparse.allow_all`, `.disallow_all`, `.is_empty` | no |
-| `robotsparse.rule_text`, `.kind_text` | no |
-| `robotsmatch.is_allowed`, `.decide`, `.matching_rules` | no |
-| `robotsmatch.group_for`, `.agent_matches` | no |
-| `robotsmatch.matches_path`, `.specificity` | no |
-| `robotsmatch.verdict_text`, `.verdict_line`, `.permits` | no |
-| `robotspolicy.availability_of`, `.rules_for_status`, `.availability_text` | no |
-| `robotspolicy.max_redirects`, `.cache_seconds` | no |
-| `robotspolicy.crawl_delay_ms`, `.delay_of`, `.sitemaps`, `.is_extension` | no |
+The suite also asserts that an unrecognised record is kept with its
+line number, that CR, LF and CR LF all end a line, that a cut file
+drops its partial last line, that a 404 opens a site while a 503 closes
+it, and the arithmetic of `crawl-delay`.
 
 ## Licence
 
