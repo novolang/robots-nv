@@ -1,11 +1,9 @@
 // robotspolicy_tests.nv — the asymmetry, and the two directives that
 // are not in the standard.
 //
-// RED ON PURPOSE: every assertion reaches `not implemented:
-// robots-nv.robotspolicy.<fn>` or a function it calls.  What is
-// asserted is that a client error opens a site and a server error
-// closes it, which is the one rule a crawler is most likely to write
-// backwards.
+// What is asserted is that a client error opens a site and a server
+// error closes it, which is the one rule a crawler is most likely to
+// write backwards.
 
 use std.test
 use robotsmatch
@@ -68,11 +66,13 @@ fn test_crawl_delay_is_milliseconds_because_sites_write_fractions() [io]
         None     => test.fail("this file asks for a delay")
 
     test.case("the group carries it too")
-    test.assert(rules.groups[0].crawl_delay_ms == 1500)
+    let group = rules.groups[0]
+    test.assert(group.crawl_delay_ms == 1500)
 
     test.case("a file that asks for none is None, which is not the same as zero")
     let plain = robotsparse.parse("user-agent: *\ndisallow: /tmp/\n")
-    test.assert(plain.groups[0].crawl_delay_ms == 0 - 1)
+    let plain_group = plain.groups[0]
+    test.assert(plain_group.crawl_delay_ms == -1)
     match robotspolicy.crawl_delay_ms(plain, "novobot")
         Some(_) => test.fail("no delay was asked for")
         None    => test.assert(true)
@@ -126,3 +126,23 @@ fn test_the_extensions_this_package_reads_are_named() [io]
     let rules = robotsparse.parse("user-agent: *\nhost: example.org\n")
     test.assert(list.len(rules.unknown) == 1)
     test.assert(rules.unknown[0].name == "host")
+
+@test
+fn test_a_redirect_the_caller_stopped_following_is_unavailable() [io]
+    // Section 2.3.1.2: more than five redirects may be taken as
+    // unavailable.
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(301)) == "unavailable")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(599)) == "unreachable")
+    test.assert(robotspolicy.availability_text(robotspolicy.availability_of(100)) == "unreachable")
+    test.assert(robotspolicy.availability_text(RobotsAvailable) == "available")
+    test.assert(robotspolicy.is_extension("Crawl-Delay"))
+
+@test
+fn test_crawl_delay_for_an_agent_nobody_named() [io]
+    let rules = robotsparse.parse("user-agent: foobot\ncrawl-delay: 3\n")
+    match robotspolicy.crawl_delay_ms(rules, "novobot")
+        Some(_) => test.fail("no group applies to novobot")
+        None    => test.assert(true)
+    match robotspolicy.crawl_delay_ms(rules, "FooBot")
+        Some(ms) => test.assert(ms == 3000)
+        None     => test.fail("foobot asked for three seconds")

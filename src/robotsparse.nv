@@ -1,35 +1,28 @@
 // robotsparse.nv — the robots.txt grammar of RFC 9309 section 2.2.
 //
-// A ROBOTS.TXT FILE HAS NO SYNTAX ERRORS
+// A robots.txt file has no syntax errors.  Section 2.3.1.5 requires a
+// crawler to try to parse each line and to use the rules it can parse,
+// and section 2.2.4 lets it ignore records it does not recognise.  So
+// `parse` answers a value and never a `Result`.
 //
-// Section 2.2.4 is explicit: a crawler MAY interpret records it does
-// not recognise, and MUST ignore the ones it cannot.  A line that is
-// not a record at all is skipped.  So `parse` answers a value and
-// never a `Result`: there is no input for which a conforming crawler
-// stops reading, and a library that invented a refusal would refuse
-// files every crawler in existence reads.
+// What it does not understand it keeps.  `RobotsRules.unknown` holds
+// every `name: value` record this package has no meaning for, with its
+// line number, so a tool that lints a site's robots.txt can report a
+// `Disalow:` typo that is doing nothing.
 //
-// What it does instead is KEEP what it did not understand.
-// `RobotsRules.unknown` holds every line that was a `name: value`
-// record this package has no meaning for, with its line number, so a
-// tool that lints a site's robots.txt can report a `Disalow:` typo
-// that is currently doing nothing at all.
+// A group is one or more `user-agent` lines followed by rules (section
+// 2.1).  Consecutive `user-agent` lines share one set of rules, and a
+// `user-agent` line after an `allow` or `disallow` line starts a new
+// group.  No other record ends a group; section 2.2.4 says a `sitemap`
+// record must not.  A rule before the first `user-agent` line is in no
+// group, and section 2.2.2 says a crawler should ignore it.
 //
-// A GROUP IS A RUN OF USER-AGENT LINES AND THE RULES AFTER THEM
-//
-// Section 2.2.1: consecutive `user-agent` lines belong to one group,
-// and the group ends at the first rule line followed by another
-// `user-agent` line.  A rule appearing before any `user-agent` line is
-// not in a group at all and is ignored, which is a real file in the
-// field and a real source of confusion.
-//
-// THE FILE IS READ AS OCTETS
-//
-// Section 2.2.2 matches a path as octets.  Nothing here decodes
-// percent-encoding, folds case in a path, or normalises `..` — a
-// matcher that did would answer differently from every crawler in
-// existence on a path holding `%2F`.  Case-insensitivity applies to
-// the record names and to the user-agent token, and to nothing else.
+// A line ends at CR, LF or CR LF, and a comment runs from `#` to the
+// end of the line (section 2.2).  Record names and user-agent tokens
+// are compared without regard to case; paths are not.
+
+use std.str
+use std.list
 
 // Whether a rule permits or forbids.
 //
@@ -61,9 +54,9 @@ pub enum RobotsRuleKind
 pub struct RobotsRule
     // Whether it permits or forbids.
     kind: RobotsRuleKind
-    // The path pattern, as written and not decoded.  `*` matches any
-    // run of octets and `$` at the end anchors to the end of the path;
-    // every other octet is itself.
+    // The path pattern, as written.  `*` matches any run of octets and
+    // `$` at the end anchors to the end of the path; every other octet
+    // is itself.
     pattern: Str
     // The 1-based line in the file the rule was written on, so a
     // message can point at it.
@@ -103,8 +96,9 @@ pub struct RobotsUnknown
 // ```
 pub struct RobotsGroup
     // The product tokens on this group's `user-agent` lines,
-    // lower-cased.  `"*"` is the catch-all.  Several because
-    // consecutive `user-agent` lines share one set of rules.
+    // lower-cased, as `token_of` reads them.  `"*"` is the catch-all.
+    // Several because consecutive `user-agent` lines share one set of
+    // rules.
     agents: [Str]
     // The rules, in the order the file gives them.  Order does not
     // decide anything — section 2.2.2's rule is longest match — but it
@@ -134,13 +128,14 @@ pub struct RobotsRules
     // Every record this package has no meaning for.
     unknown: [RobotsUnknown]
     // Rules that appeared before any `user-agent` line, and so belong
-    // to no group.  Section 2.2.1 leaves them applying to nothing, and
-    // they are kept here rather than dropped because a file with them
-    // in it is almost always a file whose author meant something else.
+    // to no group.  Section 2.2.2 says a crawler should ignore them, and
+    // they are kept here because a file with them in it is usually a
+    // file whose author meant something else.
     orphan_rules: [RobotsRule]
     // Whether the file was longer than the parse limit and was cut.
     // Section 2.5 requires a crawler to parse at least 500 kibibytes
-    // and permits it to stop there.
+    // and permits it to stop there.  A cut file is read up to its last
+    // whole line, so a rule cut in half is not obeyed as a shorter one.
     truncated: Bool
 
 // How much of a file is read.
@@ -166,7 +161,7 @@ pub struct RobotsLimits
 //     println("${list.len(rules.groups)}")
 // ```
 pub fn parse(text: Str) -> RobotsRules []
-    todo("robots-nv.robotsparse.parse")
+    parse_with_limit(text, limits())
 
 // A file, parsed, under a caller's own limit.
 //
@@ -180,7 +175,12 @@ pub fn parse(text: Str) -> RobotsRules []
 //     println("${robotsparse.parse_with_limit("", robotsparse.limits_of(64)).truncated}")
 // ```
 pub fn parse_with_limit(text: Str, l: RobotsLimits) -> RobotsRules []
-    todo("robots-nv.robotsparse.parse_with_limit")
+    var body = text
+    var truncated = false
+    if str.len(text) > l.max_bytes
+        truncated = true
+        body = whole_lines(str.slice(text, 0, l.max_bytes))
+    read_lines(body, truncated)
 
 // The section 2.5 floor: 512,000 bytes.
 //
@@ -191,7 +191,7 @@ pub fn parse_with_limit(text: Str, l: RobotsLimits) -> RobotsRules []
 //     println("${robotsparse.limits().max_bytes}")
 // ```
 pub fn limits() -> RobotsLimits []
-    todo("robots-nv.robotsparse.limits")
+    RobotsLimits { max_bytes: 512000 }
 
 // A limit of a caller's own.
 //
@@ -202,7 +202,7 @@ pub fn limits() -> RobotsLimits []
 //     println("${robotsparse.limits_of(64).max_bytes}")
 // ```
 pub fn limits_of(max_bytes: Int) -> RobotsLimits []
-    todo("robots-nv.robotsparse.limits_of")
+    RobotsLimits { max_bytes: max_bytes }
 
 // Rules that permit everything.
 //
@@ -218,7 +218,7 @@ pub fn limits_of(max_bytes: Int) -> RobotsLimits []
 //     println("${list.len(robotsparse.allow_all().groups)}")
 // ```
 pub fn allow_all() -> RobotsRules []
-    todo("robots-nv.robotsparse.allow_all")
+    RobotsRules { groups: [], sitemaps: [], unknown: [], orphan_rules: [], truncated: false }
 
 // Rules that forbid everything.
 //
@@ -232,7 +232,9 @@ pub fn allow_all() -> RobotsRules []
 //     println("${list.len(robotsparse.disallow_all().groups)}")
 // ```
 pub fn disallow_all() -> RobotsRules []
-    todo("robots-nv.robotsparse.disallow_all")
+    let everything = RobotsRule { kind: RobotsDisallow, pattern: "/", line: 0 }
+    let group = RobotsGroup { agents: ["*"], rules: [everything], crawl_delay_ms: -1, line: 0 }
+    RobotsRules { groups: [group], sitemaps: [], unknown: [], orphan_rules: [], truncated: false }
 
 // The rule printed back as the file writes it: `"disallow: /tmp/"`.
 //
@@ -244,7 +246,7 @@ pub fn disallow_all() -> RobotsRules []
 //     println(robotsparse.rule_text(rules.groups[0].rules[0]))
 // ```
 pub fn rule_text(r: RobotsRule) -> Str []
-    todo("robots-nv.robotsparse.rule_text")
+    "${kind_text(r.kind)}: ${r.pattern}"
 
 // The kind's name: `"allow"` or `"disallow"`.
 //
@@ -255,7 +257,9 @@ pub fn rule_text(r: RobotsRule) -> Str []
 //     println(robotsparse.kind_text(RobotsDisallow))
 // ```
 pub fn kind_text(k: RobotsRuleKind) -> Str []
-    todo("robots-nv.robotsparse.kind_text")
+    match k
+        RobotsAllow    => "allow"
+        RobotsDisallow => "disallow"
 
 // Whether a file said nothing that constrains any crawler.
 //
@@ -271,4 +275,169 @@ pub fn kind_text(k: RobotsRuleKind) -> Str []
 //     println("${robotsparse.is_empty(robotsparse.parse("# nothing here\n"))}")
 // ```
 pub fn is_empty(rules: RobotsRules) -> Bool []
-    todo("robots-nv.robotsparse.is_empty")
+    for g in rules.groups
+        if g.rules.len() > 0
+            return false
+    true
+
+// `text` up to and including its last line end, so a file cut by the
+// limit does not end in half a rule.
+fn whole_lines(text: Str) -> Str
+    var i = str.len(text) - 1
+    while i >= 0
+        let b = str.byte_at_or(text, i, 0)
+        if b == '\n' or b == '\r'
+            return str.slice(text, 0, i + 1)
+        i = i - 1
+    ""
+
+// The file split into lines at CR, LF and CR LF.  A line end at the
+// very end of the file does not start another line.
+fn split_lines(text: Str) -> [Str]
+    let unix = str.replace_all(str.replace_all(text, "\r\n", "\n"), "\r", "\n")
+    var lines = str.split(unix, "\n")
+    if str.ends_with(unix, "\n")
+        lines = lines[:lines.len() - 1]
+    lines
+
+// `line` with its comment removed and surrounding whitespace trimmed.
+fn uncommented(line: Str) -> Str
+    match str.index(line, "#")
+        Some(at) => str.trim(str.slice(line, 0, at))
+        None     => str.trim(line)
+
+// The product token a `user-agent` value names: `*`, or the leading run
+// of letters, `_` and `-`, lower-cased (section 2.2.1).
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println(robotsparse.token_of("ExampleBot/1.0"))   // examplebot
+// ```
+pub fn token_of(value: Str) -> Str []
+    if str.byte_at_or(value, 0, 0) == '*'
+        return "*"
+    let n = str.len(value)
+    for i in 0..n
+        if not is_token_byte(str.byte_at_or(value, i, 0))
+            return str.lower(str.slice(value, 0, i))
+    str.lower(value)
+
+fn is_token_byte(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b == '_' or b == '-'
+
+// The group being filled while the lines are read.
+struct Open
+    agents: [Str]
+    rules: [RobotsRule]
+    delay: Int
+    line: Int
+
+fn grouped(open: ?Open) -> Bool
+    match open
+        Some(_) => true
+        None    => false
+
+fn closed(o: Open) -> RobotsGroup
+    RobotsGroup { agents: o.agents, rules: o.rules, crawl_delay_ms: o.delay, line: o.line }
+
+// Every line of `text`, read into groups.
+fn read_lines(text: Str, truncated: Bool) -> RobotsRules
+    var groups: [RobotsGroup] = []
+    var sitemaps: [Str] = []
+    var unknown: [RobotsUnknown] = []
+    var orphans: [RobotsRule] = []
+    var open: ?Open = None
+    // True once the open group has an allow or disallow line, so the
+    // next user-agent line starts a new group.
+    var ruled = false
+    var number = 0
+    for raw in split_lines(text)
+        number = number + 1
+        let line = uncommented(raw)
+        let colon = str.index(line, ":") ?? -1
+        if colon < 0
+            continue
+        let name = str.lower(str.trim(str.slice(line, 0, colon)))
+        let value = str.trim(str.slice(line, colon + 1, str.len(line)))
+        if name == "user-agent"
+            match open
+                Some(o) =>
+                    if ruled
+                        list.push(groups, closed(o))
+                        open = Some(Open { agents: [token_of(value)], rules: [], delay: -1, line: number })
+                    else
+                        var agents = o.agents[:]
+                        list.push(agents, token_of(value))
+                        open = Some(Open { agents: agents, rules: o.rules, delay: o.delay, line: o.line })
+                None    =>
+                    open = Some(Open { agents: [token_of(value)], rules: [], delay: -1, line: number })
+            ruled = false
+        else if name == "allow" or name == "disallow"
+            var kind = RobotsDisallow
+            if name == "allow"
+                kind = RobotsAllow
+            let rule = RobotsRule { kind: kind, pattern: value, line: number }
+            match open
+                Some(o) =>
+                    var rules = o.rules[:]
+                    list.push(rules, rule)
+                    open = Some(Open { agents: o.agents, rules: rules, delay: o.delay, line: o.line })
+                    ruled = true
+                None    => list.push(orphans, rule)
+        else if name == "sitemap"
+            list.push(sitemaps, value)
+        else if name == "crawl-delay" and grouped(open) and delay_ms(value) >= 0
+            if let Some(o) = open
+                open = Some(Open { agents: o.agents, rules: o.rules, delay: delay_ms(value), line: o.line })
+        else
+            list.push(unknown, RobotsUnknown { name: name, value: value, line: number })
+    if let Some(o) = open
+        list.push(groups, closed(o))
+    RobotsRules { groups: groups, sitemaps: sitemaps, unknown: unknown,
+                  orphan_rules: orphans, truncated: truncated }
+
+// A `crawl-delay` value in milliseconds, or -1.
+//
+// The value is a non-negative number of seconds with an optional
+// fraction, at most a day; digits past the thousandth are dropped.
+// Anything else is -1.  `robotspolicy.delay_of` answers the same as an
+// option.
+//
+// ```novo
+// use robotsparse
+//
+// fn main() [io]
+//     println("${robotsparse.delay_ms("1.5")}")   // 1500
+// ```
+pub fn delay_ms(text: Str) -> Int []
+    let n = str.len(text)
+    if n == 0
+        return -1
+    var whole = 0
+    var frac = 0
+    var scale = 100
+    var digits = 0
+    var seen_point = false
+    for i in 0..n
+        let b = str.byte_at_or(text, i, 0)
+        if b == '.' and not seen_point
+            seen_point = true
+        else if b >= '0' and b <= '9'
+            digits = digits + 1
+            if seen_point
+                frac = frac + (b - '0') * scale
+                scale = scale / 10
+            else
+                whole = whole * 10 + (b - '0')
+                if whole > 86400
+                    return -1
+        else
+            return -1
+    if digits == 0
+        return -1
+    let ms = whole * 1000 + frac
+    if ms > 86400000
+        return -1
+    ms

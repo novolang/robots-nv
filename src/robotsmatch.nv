@@ -1,47 +1,37 @@
-// robotsmatch.nv — the decision, which is two rules and a tie-break.
+// robotsmatch.nv — the decision: which group applies, and which rule in
+// it decides.
 //
-// FINDING THE GROUP: MOST SPECIFIC, AND MERGED
+// Finding the group is section 2.2.1.  A crawler compares its product
+// token with each group's `user-agent` tokens without regard to case.
+// Every group that names the token is combined into one, which is why
+// `group_for` answers a merged `RobotsGroup`.  Only when no group names
+// the token does the `*` group apply, and when there is none of either,
+// no rules apply.
 //
-// Section 2.2.1.  A crawler compares its product token against each
-// group's `user-agent` tokens, case-insensitively, and uses the group
-// whose token is the most specific match.  `*` is the catch-all and is
-// used only when no token matches at all — it does not compete with a
-// real name on length.
+// Choosing the rule is section 2.2.2.  Every rule in the group is
+// matched against the path from its first octet, and the match with the
+// most octets decides: the length of the pattern as written, not how
+// much of the path it covered.  If an `allow` and a `disallow` are
+// equally long, the `allow` is used.  A path no rule matches is allowed,
+// and so is `/robots.txt` itself.  A rule with an empty pattern, which
+// is how `disallow:` with no value is written, matches no path it could
+// decide.
 //
-// And more than one group may name the same token.  Section 2.2.1 says
-// those groups MUST be combined into one, which is why `group_for`
-// answers a merged `RobotsGroup` rather than the first one it found.
-// A file that names `googlebot` twice, which is common, constrains it
-// with both sets of rules and not with whichever came first.
+// Two characters are special in a pattern (section 2.2.3).  `*` matches
+// any run of octets, `/` included, and `$` at the end of a pattern
+// anchors it to the end of the path.  Every other octet, `?` and a `$`
+// elsewhere included, matches itself.
 //
-// CHOOSING THE RULE: MOST OCTETS, ALLOW WINS A TIE
-//
-// Section 2.2.2.  Every rule in the group is matched against the path,
-// and the one whose PATTERN is longest in octets decides.  Not the
-// first, not the last, and not the one that matched the most of the
-// path: the length of the pattern as written, wildcards counted as the
-// characters they are.
-//
-// If an `allow` and a `disallow` are the same length, the `allow`
-// wins.  That tie-break is what makes the common pair work:
-//
-//   disallow: /admin
-//   allow: /admin
-//
-// and, more usefully, what decides `/p` against `/p` when a site has
-// written both.
-//
-// A path that no rule matches is ALLOWED.  robots.txt is a list of
-// exclusions, and silence is permission.
-//
-// THE PATH IS OCTETS, AND `*` IS NOT A GLOB
-//
-// Section 2.2.2 gives two special characters and no others.  `*`
-// matches any run of octets INCLUDING `/`, which is the opposite of
-// what `*` means in a shell or in a glob library.  `$` at the end of a
-// pattern anchors the match to the end of the path.  There is no `?`,
-// no character class, and no escape: a literal `*` cannot be written.
+// Before comparing, both sides are brought to the form section 2.2.2
+// prescribes.  An octet outside ASCII is written as `%` and two
+// upper-case hex digits, and the hex digits of an existing `%xx` are
+// upper-cased.  In the path, a `%xx` that encodes an unreserved
+// character of RFC 3986 (a letter, a digit, `-`, `.`, `_` or `~`) is
+// decoded.  Nothing else is decoded, so `%2F` stays three octets and
+// never matches `/`.
 
+use std.str
+use std.list
 use robotsparse
 
 // What the rules say about one path.
@@ -65,13 +55,13 @@ pub enum RobotsVerdict
 
 // Whether a crawler calling itself `agent` may fetch `path`.
 //
-// `path` is the path and query of the URL, as octets, beginning with
-// `/` — `"/a/b?c=1"`.  `agent` is the product token the crawler
+// `path` is the path and query of the URL as it appears in the URI,
+// beginning with `/`: `"/a/b?c=1"`.  An empty path is `/`.  `agent` is the product token the crawler
 // identifies itself by, without a version: `"novobot"`, not
 // `"novobot/1.0 (+https://example.org)"`.
 //
 // A path no rule matches is allowed, because robots.txt is a list of
-// exclusions.
+// exclusions, and `/robots.txt` itself is always allowed.
 //
 // ```novo
 // use robotsmatch
@@ -83,7 +73,7 @@ pub enum RobotsVerdict
 //     println("${robotsmatch.is_allowed(rules, "novobot", "/about")}")
 // ```
 pub fn is_allowed(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> Bool []
-    todo("robots-nv.robotsmatch.is_allowed")
+    permits(decide(rules, agent, path))
 
 // The same decision, with the rule that made it.
 //
@@ -99,13 +89,28 @@ pub fn is_allowed(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> Bool
 //     println(robotsmatch.verdict_text(robotsmatch.decide(rules, "novobot", "/tmp/x")))
 // ```
 pub fn decide(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> RobotsVerdict []
-    todo("robots-nv.robotsmatch.decide")
+    if canonical_path(path) == "/robots.txt"
+        return RobotsUnmatched
+    var best = -1
+    var verdict = RobotsUnmatched
+    for r in matching_rules(rules, agent, path)
+        let n = specificity(r.pattern)
+        if allows(r.kind)
+            if n > best or n == best and not permits(verdict)
+                best = n
+                verdict = RobotsAllowed(r.line)
+        else if n > best
+            best = n
+            verdict = RobotsDisallowed(r.line)
+    verdict
 
 // The group that applies to an agent, with every group naming it
 // merged into one, or `None`.
 //
 // Section 2.2.1's rule in one call.  `None` when no group names the
-// agent and no group names `*`, which means nothing constrains it.
+// agent and no group names `*`, which means nothing constrains it.  The
+// merged group lists every token of the groups it came from, and its
+// crawl delay is the first one they give.
 //
 // ```novo
 // use robotsmatch
@@ -118,31 +123,40 @@ pub fn decide(rules: robotsparse.RobotsRules, agent: Str, path: Str) -> RobotsVe
 //         None        => println("nothing constrains this agent")
 // ```
 pub fn group_for(rules: robotsparse.RobotsRules, agent: Str) -> ?robotsparse.RobotsGroup []
-    todo("robots-nv.robotsmatch.group_for")
+    var named = merged(rules, token_of_agent(agent))
+    if named == None
+        named = merged(rules, "*")
+    named
 
 // Whether a `user-agent` token applies to an agent name.
 //
-// Case-insensitive, and `"*"` applies to everything.  A token applies
-// when the agent name begins with it, which is what lets a file name
-// `googlebot` and constrain `googlebot-image` — and what a crawler
-// naming itself `novobot-news` should expect.
+// `"*"` applies to everything.  Otherwise both are read up to the first
+// character that cannot be in a product token (section 2.2.1 allows
+// letters, `_` and `-`), and the two tokens must be equal without regard
+// to case.  So `ExampleBot/1.0` applies to `examplebot`, and
+// `googlebot` does not apply to `googlebot-image`.
 //
 // ```novo
 // use robotsmatch
 //
 // fn main() [io]
-//     println("${robotsmatch.agent_matches("Googlebot", "googlebot-image")}")
-//     println("${robotsmatch.agent_matches("bingbot", "googlebot")}")
+//     println("${robotsmatch.agent_matches("Googlebot", "googlebot")}")
+//     println("${robotsmatch.agent_matches("googlebot", "googlebot-image")}")
 // ```
 pub fn agent_matches(token: Str, agent: Str) -> Bool []
-    todo("robots-nv.robotsmatch.agent_matches")
+    let t = robotsparse.token_of(token)
+    if t == "*"
+        return true
+    t != "" and t == token_of_agent(agent)
 
 // Whether a path pattern matches a path.
 //
-// Section 2.2.2's two special characters and nothing else: `*` is any
+// Section 2.2.3's two special characters and nothing else: `*` is any
 // run of octets including `/`, and `$` at the end anchors to the end
 // of the path.  A pattern that is a prefix of the path matches, which
-// is why `disallow: /tmp` forbids `/tmpfile` as well as `/tmp/x`.
+// is why `disallow: /tmp` forbids `/tmpfile` as well as `/tmp/x`.  Both
+// are percent-encoded as the module header describes before they are
+// compared.
 //
 // Public because a linter checking a site's own file, and a caller
 // writing its own filter over the parsed rules, both need exactly this
@@ -156,15 +170,15 @@ pub fn agent_matches(token: Str, agent: Str) -> Bool []
 //     println("${robotsmatch.matches_path("/*.pdf\u{24}", "/a/b.pdf")}")
 // ```
 pub fn matches_path(pattern: Str, path: Str) -> Bool []
-    todo("robots-nv.robotsmatch.matches_path")
+    pattern_matches(canonical_pattern(pattern), canonical_path(path))
 
 // How specific a pattern is, in octets.
 //
-// The number section 2.2.2 compares: the length of the pattern as
-// written, with `*` and `$` counted as the characters they are.  It is
-// NOT how much of the path was matched, and the difference decides
-// every case where a short wildcard pattern competes with a long
-// literal one.
+// The number section 2.2.2 compares: the length of the pattern in
+// octets, after a non-ASCII octet is written as its three-octet escape,
+// with `*` and `$` counted as the characters they are.  It is not how
+// much of the path was matched, and the difference decides every case
+// where a short wildcard pattern competes with a long literal one.
 //
 // ```novo
 // use robotsmatch
@@ -173,11 +187,12 @@ pub fn matches_path(pattern: Str, path: Str) -> Bool []
 //     println("${robotsmatch.specificity("/tmp/")}")
 // ```
 pub fn specificity(pattern: Str) -> Int []
-    todo("robots-nv.robotsmatch.specificity")
+    str.len(canonical_pattern(pattern))
 
 // Every rule in the agent's group that matches a path, in file order.
 //
-// `decide` answers which one won; this answers all of them.  A tool
+// `decide` answers which one won; this answers all of them.  A rule
+// with an empty pattern is not listed, because it decides nothing.  A tool
 // explaining a robots.txt to its author shows the list, because the
 // interesting part is usually the rule the author expected to win.
 //
@@ -191,7 +206,10 @@ pub fn specificity(pattern: Str) -> Int []
 // ```
 pub fn matching_rules(rules: robotsparse.RobotsRules, agent: Str,
                       path: Str) -> [robotsparse.RobotsRule] []
-    todo("robots-nv.robotsmatch.matching_rules")
+    let wanted = canonical_path(path)
+    if let Some(group) = group_for(rules, agent)
+        return list.filter(group.rules, r => decides(r, wanted))
+    []
 
 // The verdict's name for a message: `"allowed"`, `"disallowed"`,
 // `"unmatched"`.
@@ -203,7 +221,10 @@ pub fn matching_rules(rules: robotsparse.RobotsRules, agent: Str,
 //     println(robotsmatch.verdict_text(RobotsDisallowed(3)))
 // ```
 pub fn verdict_text(v: RobotsVerdict) -> Str []
-    todo("robots-nv.robotsmatch.verdict_text")
+    match v
+        RobotsUnmatched     => "unmatched"
+        RobotsAllowed(_)    => "allowed"
+        RobotsDisallowed(_) => "disallowed"
 
 // The line the deciding rule is on, or `0` when nothing matched.
 //
@@ -214,7 +235,10 @@ pub fn verdict_text(v: RobotsVerdict) -> Str []
 //     println("${robotsmatch.verdict_line(RobotsAllowed(4))}")
 // ```
 pub fn verdict_line(v: RobotsVerdict) -> Int []
-    todo("robots-nv.robotsmatch.verdict_line")
+    match v
+        RobotsUnmatched        => 0
+        RobotsAllowed(line)    => line
+        RobotsDisallowed(line) => line
 
 // Whether a verdict permits the fetch.
 //
@@ -229,4 +253,141 @@ pub fn verdict_line(v: RobotsVerdict) -> Int []
 //     println("${robotsmatch.permits(RobotsUnmatched)}")
 // ```
 pub fn permits(v: RobotsVerdict) -> Bool []
-    todo("robots-nv.robotsmatch.permits")
+    match v
+        RobotsDisallowed(_) => false
+        _                   => true
+
+// Whether `r` has a pattern, and it matches the canonical path
+// `wanted`.
+fn decides(r: robotsparse.RobotsRule, wanted: Str) -> Bool
+    let pattern = canonical_pattern(r.pattern)
+    str.len(pattern) > 0 and pattern_matches(pattern, wanted)
+
+// Whether a rule of kind `k` permits.
+fn allows(k: robotsparse.RobotsRuleKind) -> Bool
+    match k
+        RobotsAllow    => true
+        RobotsDisallow => false
+
+// The product token of a crawler's own name: `novobot/1.0` is
+// `novobot`.
+fn token_of_agent(agent: Str) -> Str
+    robotsparse.token_of(agent)
+
+// Every group whose tokens include `token`, combined into one, or
+// `None` when no group names it.
+fn merged(rules: robotsparse.RobotsRules, token: Str) -> ?robotsparse.RobotsGroup
+    if token == ""
+        return None
+    var agents: [Str] = []
+    var all: [robotsparse.RobotsRule] = []
+    var delay = -1
+    var line = -1
+    for g in rules.groups
+        if names(g, token)
+            if line < 0
+                line = g.line
+            if delay < 0
+                delay = g.crawl_delay_ms
+            list.append(agents, g.agents)
+            list.append(all, g.rules)
+    if line < 0
+        return None
+    Some(RobotsGroup { agents: agents, rules: all, crawl_delay_ms: delay, line: line })
+
+// Whether `g` has `token` among its tokens.
+fn names(g: robotsparse.RobotsGroup, token: Str) -> Bool
+    for a in g.agents
+        if a == token
+            return true
+    false
+
+// Whether `b` is an ASCII hex digit.
+fn is_hex(b: Int) -> Bool
+    b >= '0' and b <= '9' or b >= 'a' and b <= 'f' or b >= 'A' and b <= 'F'
+
+// The value of the hex digit `b`.
+fn hex_value(b: Int) -> Int
+    if b >= '0' and b <= '9'
+        return b - '0'
+    if b >= 'a' and b <= 'f'
+        return b - 'a' + 10
+    b - 'A' + 10
+
+// `b` as `%` and two upper-case hex digits.
+fn escaped(b: Int) -> Str
+    let digits = "0123456789ABCDEF"
+    "%" + str.slice(digits, b >> 4, (b >> 4) + 1) + str.slice(digits, b & 15, (b & 15) + 1)
+
+// Whether `b` is an unreserved character of RFC 3986 section 2.3.
+fn is_unreserved(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or
+        b == '-' or b == '.' or b == '_' or b == '~'
+
+// `text` with non-ASCII octets escaped and existing escapes upper-cased,
+// and, when `decode` is set, escapes of unreserved characters decoded.
+fn canonical(text: Str, decode: Bool) -> Str
+    var out = ""
+    let n = str.len(text)
+    // Octets already written as part of an escape read at an earlier
+    // offset.
+    var skip = 0
+    for i in 0..n
+        if skip > 0
+            skip = skip - 1
+            continue
+        let b = str.byte_at_or(text, i, 0)
+        let hi = str.byte_at_or(text, i + 1, 0)
+        let lo = str.byte_at_or(text, i + 2, 0)
+        if b == '%' and i + 2 < n and is_hex(hi) and is_hex(lo)
+            let v = hex_value(hi) * 16 + hex_value(lo)
+            if decode and is_unreserved(v)
+                out = out + str.from_byte(v)
+            else
+                out = out + escaped(v)
+            skip = 2
+        else if b >= 128
+            out = out + escaped(b)
+        else
+            out = out + str.from_byte(b)
+    out
+
+// A rule's pattern in the form it is compared in.
+fn canonical_pattern(pattern: Str) -> Str
+    canonical(pattern, false)
+
+// A path in the form it is compared in.  An empty path is `/`.
+fn canonical_path(path: Str) -> Str
+    if path == ""
+        return "/"
+    canonical(path, true)
+
+// Section 2.2.2's match of a canonical pattern against a canonical
+// path, from the path's first octet.
+//
+// `ends` holds every offset in the path the pattern read so far can end
+// at, in increasing order.  A `*` extends it to every offset from the
+// first onwards, an octet keeps the offsets it can be read at, and a
+// final `$` asks whether the path's end is among them.
+fn pattern_matches(pattern: Str, path: Str) -> Bool
+    let plen = str.len(path)
+    let n = str.len(pattern)
+    var ends: [Int] = [0]
+    for k in 0..n
+        let c = str.byte_at_or(pattern, k, 0)
+        if c == '$' and k == n - 1
+            return ends[ends.len() - 1] == plen
+        if c == '*'
+            var every: [Int] = []
+            for at in ends[0]..plen + 1
+                list.push(every, at)
+            ends = every
+        else
+            var kept: [Int] = []
+            for at in ends
+                if at < plen and str.byte_at_or(path, at, 0) == c
+                    list.push(kept, at + 1)
+            if kept.len() == 0
+                return false
+            ends = kept
+    true

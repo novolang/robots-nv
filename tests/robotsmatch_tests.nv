@@ -1,11 +1,11 @@
 // robotsmatch_tests.nv — the longest-match rule, the tie-break, and
 // the two special characters.
 //
-// RED ON PURPOSE: every assertion reaches `not implemented:
-// robots-nv.robotsmatch.<fn>` or a function it calls.  What is
-// asserted is that the longest PATTERN decides rather than the first
-// or the last rule, that an allow wins a tie, that `*` crosses a
-// slash, and that silence is permission.
+// What is asserted is that the longest pattern decides rather than the
+// first or the last rule, that an allow wins a tie, that `*` crosses a
+// slash, and that silence is permission.  The last part holds RFC 9309's
+// own examples and the documented cases of Google's robots.txt parser,
+// github.com/google/robotstxt, robots_test.cc.
 
 use std.test
 use robotsmatch
@@ -97,7 +97,7 @@ fn test_the_two_special_characters_and_no_others() [io]
                                        "novobot", "/anything"))
 
 @test
-fn test_the_group_is_the_most_specific_match_and_the_star_does_not_compete() [io]
+fn test_a_named_group_is_used_and_the_star_does_not_compete() [io]
     // Section 2.2.1.  `*` is used only when no real token matches.
     let rules = rules_of("user-agent: *\ndisallow: /\nuser-agent: novobot\ndisallow: /tmp/\n")
 
@@ -108,8 +108,10 @@ fn test_the_group_is_the_most_specific_match_and_the_star_does_not_compete() [io
     test.case("and an agent nobody named falls to the catch-all")
     test.assert(not robotsmatch.is_allowed(rules, "othercrawler", "/about"))
 
-    test.case("the token match is case-insensitive and is a prefix of the agent name")
-    test.assert(robotsmatch.agent_matches("Googlebot", "googlebot-image"))
+    test.case("the token match is case-insensitive and exact, not a prefix")
+    test.assert(robotsmatch.agent_matches("Googlebot", "googlebot"))
+    test.assert(robotsmatch.agent_matches("ExampleBot/1.0", "examplebot"))
+    test.assert(not robotsmatch.agent_matches("Googlebot", "googlebot-image"))
     test.assert(robotsmatch.agent_matches("*", "anything-at-all"))
     test.assert(not robotsmatch.agent_matches("bingbot", "googlebot"))
 
@@ -138,3 +140,166 @@ fn test_two_groups_naming_one_agent_are_combined() [io]
     match robotsmatch.group_for(rules, "novobot")
         Some(group) => test.assert(list.len(group.rules) == 2)
         None        => test.fail("novobot is named twice in this file")
+
+// ── RFC 9309's own examples ─────────────────────────────────────────
+
+@test
+fn test_rfc_9309_figure_2_merges_two_groups_for_one_token() [io]
+    let rules = rules_of("user-agent: ExampleBot\ndisallow: /foo\ndisallow: /bar\n\nuser-agent: ExampleBot\ndisallow: /baz\n")
+    test.case("the merged group holds all three rules")
+    match robotsmatch.group_for(rules, "ExampleBot")
+        Some(group) => test.assert(list.len(group.rules) == 3)
+        None        => test.fail("ExampleBot is named")
+    test.assert(not robotsmatch.is_allowed(rules, "ExampleBot", "/baz"))
+
+@test
+fn test_rfc_9309_figure_3_falls_back_to_the_star_group() [io]
+    let rules = rules_of("user-agent: *\ndisallow: /foo\ndisallow: /bar\n\nuser-agent: BazBot\ndisallow: /baz\n")
+    test.case("ExampleBot obeys the star group")
+    test.assert(not robotsmatch.is_allowed(rules, "ExampleBot", "/foo"))
+    test.assert(robotsmatch.is_allowed(rules, "ExampleBot", "/baz"))
+    test.case("and BazBot obeys its own group only")
+    test.assert(robotsmatch.is_allowed(rules, "BazBot", "/foo"))
+    test.assert(not robotsmatch.is_allowed(rules, "BazBot", "/baz"))
+
+@test
+fn test_rfc_9309_figure_4_percent_encoding() [io]
+    // Section 2.2.2: a non-ASCII octet is percent-encoded before
+    // comparison, and an encoded unreserved character in the URI is
+    // decoded.
+    let tsu = rules_of("user-agent: *\ndisallow: /\nallow: /foo/bar/\u{30C4}\n")
+    test.case("a pattern holding U+30C4 matches its encoded form")
+    test.assert(robotsmatch.is_allowed(tsu, "FooBot", "/foo/bar/%E3%83%84"))
+    test.assert(robotsmatch.is_allowed(tsu, "FooBot", "/foo/bar/%e3%83%84"))
+    test.case("and a path holding it raw is encoded the same way")
+    test.assert(robotsmatch.is_allowed(tsu, "FooBot", "/foo/bar/\u{30C4}"))
+
+    let baz = rules_of("user-agent: *\ndisallow: /\nallow: /foo/bar/baz\n")
+    test.case("%62%61%7A in the URI is baz")
+    test.assert(robotsmatch.is_allowed(baz, "FooBot", "/foo/bar/%62%61%7A"))
+
+    let query = rules_of("user-agent: *\ndisallow: /\nallow: /foo/bar?baz=https%3A%2F%2Ffoo.bar\n")
+    test.case("a reserved character stays encoded")
+    test.assert(robotsmatch.is_allowed(query, "FooBot", "/foo/bar?baz=https%3A%2F%2Ffoo.bar"))
+    test.assert(robotsmatch.is_allowed(query, "FooBot", "/foo/bar?baz=https%3a%2f%2ffoo.bar"))
+    test.assert(not robotsmatch.is_allowed(query, "FooBot", "/foo/bar?baz=https://foo.bar"))
+
+@test
+fn test_rfc_9309_figure_5_special_characters() [io]
+    let rules = rules_of("user-agent: *\ndisallow: /\nallow: / # comment in line\n# comment on its own line\n")
+    test.case("a comment ends the value")
+    test.assert(robotsmatch.is_allowed(rules, "FooBot", "/x"))
+    test.case("$ anchors and * spans")
+    test.assert(robotsmatch.matches_path("/this/path/exactly\u{24}", "/this/path/exactly"))
+    test.assert(not robotsmatch.matches_path("/this/path/exactly\u{24}", "/this/path/exactly/not"))
+    test.assert(robotsmatch.matches_path("/this/*/exactly", "/this/a/b/exactly"))
+
+@test
+fn test_rfc_9309_figure_6_a_literal_star_or_dollar_is_percent_encoded() [io]
+    test.assert(robotsmatch.matches_path("/path/file-with-a-%2A.html", "/path/file-with-a-%2A.html"))
+    test.assert(robotsmatch.matches_path("/path/foo-%24", "/path/foo-%24"))
+    test.assert(not robotsmatch.matches_path("/path/foo-%24", "/path/foo-"))
+
+@test
+fn test_the_robots_txt_path_is_always_allowed() [io]
+    // Section 2.2.2: "The /robots.txt URI is implicitly allowed."
+    let closed = rules_of("user-agent: *\ndisallow: /\n")
+    test.assert(robotsmatch.is_allowed(closed, "FooBot", "/robots.txt"))
+    test.assert(not robotsmatch.is_allowed(closed, "FooBot", "/robots.txt.bak"))
+
+// ── Google's documented cases ───────────────────────────────────────
+
+@test
+fn test_google_the_user_agent_value_is_case_insensitive_and_ends_at_a_space() [io]
+    // ID_UserAgentValueCaseInsensitive and
+    // GoogleOnly_AcceptUserAgentUpToFirstSpace.
+    for text in ["User-Agent: FOO BAR\nAllow: /x/\nDisallow: /\n",
+                 "User-Agent: foo bar\nAllow: /x/\nDisallow: /\n",
+                 "User-Agent: FoO bAr\nAllow: /x/\nDisallow: /\n"]
+        let rules = rules_of(text)
+        test.assert(robotsmatch.is_allowed(rules, "Foo", "/x/y"))
+        test.assert(not robotsmatch.is_allowed(rules, "Foo", "/a/b"))
+        test.assert(robotsmatch.is_allowed(rules, "Bar", "/a/b"))
+
+@test
+fn test_google_global_groups_are_secondary() [io]
+    // ID_GlobalGroups_Secondary.
+    test.assert(robotsmatch.is_allowed(rules_of(""), "FooBot", "/x/y"))
+    let global = rules_of("user-agent: *\nallow: /\nuser-agent: FooBot\ndisallow: /\n")
+    test.assert(not robotsmatch.is_allowed(global, "FooBot", "/x/y"))
+    let specific = rules_of("user-agent: FooBot\nallow: /\nuser-agent: BarBot\ndisallow: /\nuser-agent: BazBot\ndisallow: /\n")
+    test.assert(robotsmatch.is_allowed(specific, "QuxBot", "/x/y"))
+
+@test
+fn test_google_the_path_is_case_sensitive() [io]
+    // ID_AllowDisallow_Value_CaseSensitive.
+    test.assert(not robotsmatch.is_allowed(rules_of("user-agent: FooBot\ndisallow: /x/\n"), "FooBot", "/x/y"))
+    test.assert(robotsmatch.is_allowed(rules_of("user-agent: FooBot\ndisallow: /X/\n"), "FooBot", "/x/y"))
+
+@test
+fn test_google_the_longest_match_decides() [io]
+    // ID_LongestMatch.
+    let same = rules_of("user-agent: FooBot\ndisallow: /x/page.html\nallow: /x/page.html\n")
+    test.assert(robotsmatch.is_allowed(same, "FooBot", "/x/page.html"))
+    let root = rules_of("user-agent: FooBot\nallow: /\ndisallow: /\n")
+    test.assert(robotsmatch.is_allowed(root, "FooBot", "/"))
+    let wild = rules_of("user-agent: FooBot\nallow: /page\ndisallow: /*.html\n")
+    test.assert(not robotsmatch.is_allowed(wild, "FooBot", "/page.html"))
+    test.assert(robotsmatch.is_allowed(wild, "FooBot", "/page"))
+    let longer = rules_of("user-agent: FooBot\nallow: /x/page.\ndisallow: /*.html\n")
+    test.assert(robotsmatch.is_allowed(longer, "FooBot", "/x/page.html"))
+    test.assert(not robotsmatch.is_allowed(longer, "FooBot", "/x/y.html"))
+    let groups = rules_of("user-agent: *\ndisallow: /x/\nuser-agent: FooBot\ndisallow: /y/\n")
+    test.assert(robotsmatch.is_allowed(groups, "FooBot", "/x/page"))
+    test.assert(not robotsmatch.is_allowed(groups, "FooBot", "/y/page"))
+
+@test
+fn test_google_special_characters() [io]
+    // ID_SpecialCharacters.
+    let star = rules_of("user-agent: FooBot\ndisallow: /foo/bar/quz\nallow: /foo/*/qux\n")
+    test.assert(not robotsmatch.is_allowed(star, "FooBot", "/foo/bar/quz"))
+    test.assert(robotsmatch.is_allowed(star, "FooBot", "/foo/quz"))
+    test.assert(robotsmatch.is_allowed(star, "FooBot", "/foo//quz"))
+    test.assert(robotsmatch.is_allowed(star, "FooBot", "/foo/bax/quz"))
+    let dollar = rules_of("user-agent: FooBot\ndisallow: /foo/bar\u{24}\nallow: /foo/bar/qux\n")
+    test.assert(not robotsmatch.is_allowed(dollar, "FooBot", "/foo/bar"))
+    test.assert(robotsmatch.is_allowed(dollar, "FooBot", "/foo/bar/qux"))
+    test.assert(robotsmatch.is_allowed(dollar, "FooBot", "/foo/bar/"))
+    test.assert(robotsmatch.is_allowed(dollar, "FooBot", "/foo/bar/baz"))
+    let commented = rules_of("user-agent: FooBot\n# disallow: /\ndisallow: /foo/quz#qux\nallow: /\n")
+    test.assert(robotsmatch.is_allowed(commented, "FooBot", "/foo/bar"))
+    test.assert(not robotsmatch.is_allowed(commented, "FooBot", "/foo/quz"))
+
+@test
+fn test_google_an_empty_disallow_allows_everything() [io]
+    let empty = rules_of("user-agent: FooBot\ndisallow:\n")
+    test.assert(robotsmatch.is_allowed(empty, "FooBot", "/"))
+    test.assert(robotsmatch.is_allowed(empty, "FooBot", "/x"))
+    test.assert(list.len(robotsmatch.matching_rules(empty, "FooBot", "/x")) == 0)
+    // And an empty allow re-opens nothing.
+    let closed = rules_of("user-agent: FooBot\ndisallow: /\nallow:\n")
+    test.assert(not robotsmatch.is_allowed(closed, "FooBot", "/x"))
+
+@test
+fn test_the_verdict_and_the_path_edges() [io]
+    let rules = rules_of("user-agent: *\ndisallow: /\n")
+    test.case("an empty path is the root")
+    test.assert(not robotsmatch.is_allowed(rules, "novobot", ""))
+    test.case("the verdict names the line")
+    test.assert(robotsmatch.verdict_text(RobotsDisallowed(2)) == "disallowed")
+    test.assert(robotsmatch.verdict_text(RobotsAllowed(2)) == "allowed")
+    test.assert(robotsmatch.verdict_line(RobotsDisallowed(2)) == 2)
+    test.assert(robotsmatch.verdict_line(RobotsAllowed(4)) == 4)
+    test.case("a token that is not a product token names nobody")
+    test.assert(not robotsmatch.agent_matches("/x", "novobot"))
+    match robotsmatch.group_for(rules, "/")
+        Some(group) => test.assert(group.agents[0] == "*")
+        None        => test.fail("the star group applies to every crawler")
+    test.case("a trailing percent sign is an ordinary octet")
+    test.assert(robotsmatch.matches_path("/a%", "/a%"))
+    test.assert(robotsmatch.matches_path("/a%4", "/a%4"))
+    test.assert(not robotsmatch.matches_path("/a%zz", "/a%ZZ"))
+    test.case("specificity counts the encoded octets")
+    test.assert(robotsmatch.specificity("/\u{30C4}") == 10)
+    test.case("a wildcard can run past the end of a shorter path")
+    test.assert(not robotsmatch.matches_path("/ab*c", "/ab"))

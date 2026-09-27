@@ -1,11 +1,10 @@
 // robotsparse_tests.nv — the grammar of section 2.2, and what is kept
 // rather than dropped.
 //
-// RED ON PURPOSE: every assertion reaches `not implemented:
-// robots-nv.robotsparse.<fn>`.  What is asserted is that a robots.txt
-// file has no syntax errors, that consecutive user-agent lines share
-// one set of rules, and that a rule before any user-agent line belongs
-// to nothing and is kept so a linter can say so.
+// What is asserted is that a robots.txt file has no syntax errors, that
+// consecutive user-agent lines share one set of rules, and that a rule
+// before any user-agent line belongs to nothing and is kept so a linter
+// can say so.
 
 use std.test
 use robotsparse
@@ -26,7 +25,7 @@ fn test_a_robots_file_has_no_syntax_errors() [io]
     test.case("a line that is not a record at all is skipped")
     test.assert(robotsparse.is_empty(robotsparse.parse("this is not a record\n")))
 
-    test.case("and a record nobody recognises is KEPT, so a linter can report it")
+    test.case("and a record nobody recognises is kept, so a linter can report it")
     let typo = robotsparse.parse("user-agent: *\ndisalow: /admin\n")
     test.assert(list.len(typo.unknown) == 1)
     test.assert(typo.unknown[0].name == "disalow")
@@ -48,7 +47,8 @@ fn test_consecutive_user_agent_lines_share_one_set_of_rules() [io]
     test.assert(list.len(rules.groups[0].rules) == 1)
 
     test.case("the tokens are lower-cased, because matching them is case-insensitive")
-    test.assert(rules.groups[0].agents[0] == "novobot")
+    let group = rules.groups[0]
+    test.assert(group.agents[0] == "novobot")
 
     test.case("and a user-agent line after a rule starts a new group")
     let two = robotsparse.parse("user-agent: a\ndisallow: /x\nuser-agent: b\ndisallow: /y\n")
@@ -95,11 +95,13 @@ fn test_the_two_rule_kinds_and_the_empty_disallow() [io]
 fn test_a_comment_ends_a_line_wherever_it_is() [io]
     let rules = robotsparse.parse("user-agent: *   # everyone\ndisallow: /tmp/ # the scratch area\n")
 
+    let group = rules.groups[0]
     test.case("the token is what was before the hash, trimmed")
-    test.assert(rules.groups[0].agents[0] == "*")
+    test.assert(group.agents[0] == "*")
 
     test.case("and so is the pattern")
-    test.assert(rules.groups[0].rules[0].pattern == "/tmp/")
+    let rule = group.rules[0]
+    test.assert(rule.pattern == "/tmp/")
 
 @test
 fn test_the_two_open_and_closed_values_are_available_as_rules() [io]
@@ -112,7 +114,8 @@ fn test_the_two_open_and_closed_values_are_available_as_rules() [io]
     let closed = robotsparse.disallow_all()
     test.assert(not robotsparse.is_empty(closed))
     test.assert(list.len(closed.groups) == 1)
-    test.assert(closed.groups[0].agents[0] == "*")
+    let everyone = closed.groups[0]
+    test.assert(everyone.agents[0] == "*")
 
 @test
 fn test_a_file_longer_than_the_limit_is_cut_and_says_so() [io]
@@ -132,3 +135,60 @@ fn test_a_file_longer_than_the_limit_is_cut_and_says_so() [io]
     let cut = robotsparse.parse_with_limit("user-agent: *\ndisallow: /tmp/\n",
                                            robotsparse.limits_of(16))
     test.assert(cut.truncated)
+
+@test
+fn test_a_line_ends_at_cr_lf_or_both() [io]
+    // Section 2.2's NL is %x0D / %x0A / %x0D.0A.
+    for text in ["user-agent: *\rdisallow: /a\r", "user-agent: *\r\ndisallow: /a\r\n",
+                 "user-agent: *\ndisallow: /a"]
+        let rules = robotsparse.parse(text)
+        let group = rules.groups[0]
+        test.assert(list.len(group.rules) == 1)
+        let rule = group.rules[0]
+        test.assert(rule.pattern == "/a")
+        test.assert(rule.line == 2)
+
+@test
+fn test_a_cut_file_drops_its_last_partial_line() [io]
+    // Cut at 30 bytes, the second rule would read `/priv`; it is
+    // dropped rather than obeyed as a different rule.
+    let text = "user-agent: *\ndisallow: /a\ndisallow: /private\n"
+    let cut = robotsparse.parse_with_limit(text, robotsparse.limits_of(30))
+    test.assert(cut.truncated)
+    let group = cut.groups[0]
+    test.assert(list.len(group.rules) == 1)
+    test.case("a limit inside the first line leaves nothing")
+    test.assert(robotsparse.is_empty(robotsparse.parse_with_limit(text, robotsparse.limits_of(5))))
+
+@test
+fn test_a_user_agent_value_names_its_product_token() [io]
+    // Section 2.2.1: the product token is letters, `_` and `-`.
+    test.assert(robotsparse.token_of("ExampleBot/1.0") == "examplebot")
+    test.assert(robotsparse.token_of("Foo Bar") == "foo")
+    test.assert(robotsparse.token_of("* ignored") == "*")
+    test.assert(robotsparse.token_of("/x") == "")
+
+@test
+fn test_a_crawl_delay_that_applies_to_nothing_is_kept_as_unknown() [io]
+    let rules = robotsparse.parse("crawl-delay: 5\nuser-agent: *\ncrawl-delay: soon\ncrawl-delay: 2\n")
+    test.case("before any group, and unreadable, both are kept")
+    test.assert(list.len(rules.unknown) == 2)
+    test.case("the readable one inside the group is used")
+    let group = rules.groups[0]
+    test.assert(group.crawl_delay_ms == 2000)
+    test.case("and a crawl-delay does not end the user-agent lines")
+    let shared = robotsparse.parse("user-agent: a\ncrawl-delay: 1\nuser-agent: b\ndisallow: /\n")
+    test.assert(list.len(shared.groups) == 1)
+
+@test
+fn test_the_delay_arithmetic() [io]
+    test.assert(robotsparse.delay_ms("0") == 0)
+    test.assert(robotsparse.delay_ms(".5") == 500)
+    test.assert(robotsparse.delay_ms("0.1234") == 123)
+    test.assert(robotsparse.delay_ms("86400") == 86400000)
+    test.assert(robotsparse.delay_ms("86401") == -1)
+    test.assert(robotsparse.delay_ms("86400.5") == -1)
+    test.assert(robotsparse.delay_ms("1.2.3") == -1)
+    test.assert(robotsparse.delay_ms(".") == -1)
+    test.assert(robotsparse.delay_ms("") == -1)
+    test.assert(robotsparse.delay_ms("1e3") == -1)

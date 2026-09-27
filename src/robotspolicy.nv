@@ -1,37 +1,28 @@
 // robotspolicy.nv — what to do when there is no file to read, and the
-// two directives that are not in the standard.
-//
-// A STATUS CODE IS A DECISION, AND A DECISION IS PURE
+// two records outside the standard that this package reads.
 //
 // RFC 9309 section 2.3.1 says what a crawler must assume when
 // robots.txt does not arrive:
 //
 //   2xx           parse what came back
-//   4xx           there are no rules; the crawler may access anything
-//   5xx, network  assume COMPLETE DISALLOW while it lasts
+//   4xx           "unavailable": the crawler may access anything
+//   5xx, network  "unreachable": the crawler must assume complete
+//                 disallow
 //
-// The asymmetry is the whole of it.  A client error means the site
-// says there is no file, which is a positive answer.  A server error
-// means the site could not answer at all, and a crawler that read that
-// as permission would hammer a site precisely while it was failing.
+// A client error means the site says there is no file.  A server error
+// means the site could not answer, and a crawler that took that as
+// permission would crawl hardest while the site was failing.  Making
+// the request is the caller's; deciding what the answer means is a pure
+// function of the status, and it is here.
 //
-// Making the request is `[net]` and belongs to the caller.  Deciding
-// what the answer means is arithmetic, and it is here, so that no
-// crawler has to reimplement the asymmetry and get it the wrong way
-// round.
-//
-// CRAWL-DELAY AND SITEMAP ARE NOT IN RFC 9309
-//
-// Neither appears in the standard.  Both are read by several large
-// crawlers and written by a great many sites, and section 2.2.4
-// explicitly permits a crawler to interpret records that are not part
-// of the protocol.  So they are parsed and offered here, in a module
-// of their own, rather than mixed into the grammar as though they were
-// part of it.
-//
-// `crawl-delay` is a number of seconds and sites write fractions of
-// one, so it is carried in milliseconds.
+// `crawl-delay` and `sitemap` are not part of RFC 9309.  Section 2.2.4
+// lets a crawler interpret records outside the protocol, and many
+// crawlers read these two, so they are parsed and offered here, apart
+// from the grammar.  `crawl-delay` is a number of seconds, and sites
+// write fractions of one, so it is carried in milliseconds.
 
+use std.str
+use robotsmatch
 use robotsparse
 
 // Whether a robots.txt file could be read, from the status of the
@@ -47,7 +38,8 @@ pub enum RobotsAvailability
     // A 2xx status: the body is the file.
     RobotsAvailable
     // A 4xx status: the site says there is no file.  Section 2.3.1.3
-    // permits a crawler to access anything.
+    // permits a crawler to access anything.  A 3xx the caller stopped
+    // following is the same (section 2.3.1.2).
     RobotsUnavailable
     // A 5xx status, a timeout, or a connection that failed.  Section
     // 2.3.1.4 requires a crawler to assume complete disallow.
@@ -55,9 +47,13 @@ pub enum RobotsAvailability
 
 // What a status code means for robots.txt.
 //
-// A code outside 100 to 599 — which is what a caller passes for a
-// timeout or a refused connection — is `RobotsUnreachable`, because a
-// request that produced no status produced no permission either.
+// 2xx is `RobotsAvailable` and 4xx is `RobotsUnavailable`.  A 3xx is
+// a redirect the caller stopped following, and section 2.3.1.2 lets a
+// crawler treat more than five consecutive redirects as unavailable, so
+// it is `RobotsUnavailable` too.  Everything else is
+// `RobotsUnreachable`: a 5xx, and any code a caller passes for a
+// timeout or a refused connection, because a request that produced no
+// status produced no permission either.
 //
 // ```novo
 // use robotspolicy
@@ -66,7 +62,11 @@ pub enum RobotsAvailability
 //     println(robotspolicy.availability_text(robotspolicy.availability_of(503)))
 // ```
 pub fn availability_of(status: Int) -> RobotsAvailability []
-    todo("robots-nv.robotspolicy.availability_of")
+    if status >= 200 and status <= 299
+        return RobotsAvailable
+    if status >= 300 and status <= 499
+        return RobotsUnavailable
+    RobotsUnreachable
 
 // The rules a crawler must use for a status that brought no file.
 //
@@ -90,7 +90,10 @@ pub fn availability_of(status: Int) -> RobotsAvailability []
 //         None        => println("parse the body that came back")
 // ```
 pub fn rules_for_status(status: Int) -> ?robotsparse.RobotsRules []
-    todo("robots-nv.robotspolicy.rules_for_status")
+    match availability_of(status)
+        RobotsAvailable   => None
+        RobotsUnavailable => Some(robotsparse.allow_all())
+        RobotsUnreachable => Some(robotsparse.disallow_all())
 
 // The availability's name for a message: `"available"`,
 // `"unavailable"`, `"unreachable"`.
@@ -102,7 +105,10 @@ pub fn rules_for_status(status: Int) -> ?robotsparse.RobotsRules []
 //     println(robotspolicy.availability_text(RobotsUnreachable))
 // ```
 pub fn availability_text(a: RobotsAvailability) -> Str []
-    todo("robots-nv.robotspolicy.availability_text")
+    match a
+        RobotsAvailable   => "available"
+        RobotsUnavailable => "unavailable"
+        RobotsUnreachable => "unreachable"
 
 // How many consecutive redirects a crawler should follow when fetching
 // robots.txt: five.
@@ -118,7 +124,7 @@ pub fn availability_text(a: RobotsAvailability) -> Str []
 //     println("${robotspolicy.max_redirects()}")
 // ```
 pub fn max_redirects() -> Int []
-    todo("robots-nv.robotspolicy.max_redirects")
+    5
 
 // How long a parsed file may be reused before it is fetched again, in
 // seconds: 86,400.
@@ -135,14 +141,15 @@ pub fn max_redirects() -> Int []
 //     println("${robotspolicy.cache_seconds()}")
 // ```
 pub fn cache_seconds() -> Int []
-    todo("robots-nv.robotspolicy.cache_seconds")
+    86400
 
 // The `crawl-delay` an agent's group asks for, in milliseconds, or
 // `None`.
 //
 // Not in RFC 9309.  Sites write it as a number of seconds and several
-// write fractions, so the value is milliseconds.  `None` when the
-// agent's group did not ask for one, which is not the same as zero.
+// write fractions, so the value is milliseconds.  `None` when no group
+// applies to the agent or its group did not ask for one, which is not
+// the same as zero.
 //
 // Obeying it is the caller's: waiting is `[time]` work and this
 // package declares no effects.
@@ -158,7 +165,12 @@ pub fn cache_seconds() -> Int []
 //         None     => println("no delay asked for")
 // ```
 pub fn crawl_delay_ms(rules: robotsparse.RobotsRules, agent: Str) -> ?Int []
-    todo("robots-nv.robotspolicy.crawl_delay_ms")
+    match robotsmatch.group_for(rules, agent)
+        Some(group) =>
+            if group.crawl_delay_ms < 0
+                return None
+            Some(group.crawl_delay_ms)
+        None        => None
 
 // Every `sitemap` line's value, in the order the file gives them.
 //
@@ -175,7 +187,7 @@ pub fn crawl_delay_ms(rules: robotsparse.RobotsRules, agent: Str) -> ?Int []
 //     println("${list.len(robotspolicy.sitemaps(rules))}")
 // ```
 pub fn sitemaps(rules: robotsparse.RobotsRules) -> [Str] []
-    todo("robots-nv.robotspolicy.sitemaps")
+    rules.sitemaps[:]
 
 // Whether a record name is one of the extensions this package reads.
 //
@@ -193,7 +205,8 @@ pub fn sitemaps(rules: robotsparse.RobotsRules) -> [Str] []
 //     println("${robotspolicy.is_extension("host")}")
 // ```
 pub fn is_extension(name: Str) -> Bool []
-    todo("robots-nv.robotspolicy.is_extension")
+    let n = str.lower(name)
+    n == "crawl-delay" or n == "sitemap"
 
 // A `crawl-delay` value as milliseconds, or `None`.
 //
@@ -210,4 +223,7 @@ pub fn is_extension(name: Str) -> Bool []
 //         None     => println("not a delay")
 // ```
 pub fn delay_of(text: Str) -> ?Int []
-    todo("robots-nv.robotspolicy.delay_of")
+    let ms = robotsparse.delay_ms(text)
+    if ms < 0
+        return None
+    Some(ms)
