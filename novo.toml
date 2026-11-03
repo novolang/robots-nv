@@ -1,6 +1,6 @@
 [package]
 name        = "robots-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "RFC 9309 as a pure decision: the robots.txt grammar parsed into groups, the longest-match rule with `*` and `$`, groups merged by user-agent token, the unavailable and unreachable status policies, and crawl-delay and sitemap read as the extensions they are."
 license     = "Apache-2.0"
 
@@ -23,7 +23,7 @@ category    = "web"
 tags        = ["robots", "robots-txt", "rfc-9309", "crawler", "user-agent", "web"]
 repository  = "https://github.com/novolang/robots-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.13.0"
+novo        = ">= 0.23.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
